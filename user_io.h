@@ -53,10 +53,18 @@
 #define UIO_SET_STATUS2 0x1e  // 32bit status
 #define UIO_GET_KBD_LED 0x1f  // keyboard LEDs control
 
+// extended joystick control (32 bit value)
+#define UIO_JOYSTICK0_EXT   0x60
+#define UIO_JOYSTICK1_EXT   0x61
+#define UIO_JOYSTICK2_EXT   0x62
+#define UIO_JOYSTICK3_EXT   0x63
+#define UIO_JOYSTICK4_EXT   0x64
+#define UIO_JOYSTICK5_EXT   0x65
+
 // codes as used by 8bit (atari 800, zx81) via SS2
-#define UIO_GET_STATUS  0x50
-#define UIO_SECTOR_SND  0x51
-#define UIO_SECTOR_RCV  0x52
+#define UIO_GET_STATUS  0x50 // removed
+#define UIO_SECTOR_SND  0x51 // removed
+#define UIO_SECTOR_RCV  0x52 // removed
 #define UIO_FILE_TX     0x53
 #define UIO_FILE_TX_DAT 0x54
 #define UIO_FILE_INDEX  0x55
@@ -162,7 +170,7 @@ void user_io_file_tx(fileTYPE *, unsigned char);
 void user_io_sd_set_config(void);
 char user_io_dip_switch1(void);
 char user_io_serial_status(serial_status_t *, uint8_t);
-void user_io_file_mount(fileTYPE *);
+void user_io_file_mount(fileTYPE *, unsigned char);
 char *user_io_get_core_name();
 
 // io controllers interface for FPGA ethernet emulation using usb ethernet
@@ -177,6 +185,7 @@ void user_io_mouse(unsigned char b, char x, char y);
 void user_io_kbd(unsigned char m, unsigned char *k, uint8_t priority, unsigned short vid, unsigned short pid);
 char user_io_create_config_name(char *s);
 void user_io_digital_joystick(unsigned char, unsigned char);
+void user_io_digital_joystick_ext(unsigned char, uint16_t);
 void user_io_analog_joystick(unsigned char, char, char);
 char user_io_osd_is_visible();
 void user_io_send_buttons(char);
@@ -187,6 +196,10 @@ void add_modifiers(uint8_t mod, uint16_t* keys_ps2);
 void user_io_set_index(unsigned char index);
 unsigned char user_io_ext_idx(fileTYPE *, char*);
 
+// called when a rom entry is found in the mist.ini
+void user_io_rom_upload(char *s, char mode);
+
+#define USB_LOAD_VAR   *(int*)(0x0020FF04)
 #define USB_LOAD_VAR   *(int*)(0x0020FF04)
 #define USB_LOAD_VALUE 12345678
 

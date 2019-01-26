@@ -367,7 +367,7 @@ static uint8_t usb_hid_init(usb_device_t *dev) {
       
       
       // use fixed setup for known interfaces 
-      
+/*    // unbreak cheap cheap Chinese controllers (not just NES) - use mist.ini instead
       if((vid == 0x0079) && (pid == 0x0011) && (i==0)) {
         iprintf("hacking cheap NES pad\n");
         
@@ -381,7 +381,7 @@ static uint8_t usb_hid_init(usb_device_t *dev) {
         info->iface[0].conf.joystick_mouse.button[3].byte_offset = 6;
         info->iface[0].conf.joystick_mouse.button[3].bitmask = 32;
       }
-
+*/
       if((vid == 0x04d8) && (pid == 0xf6ec) && (i==0)) {
         iprintf("hacking 5200daptor\n");
             
@@ -770,6 +770,9 @@ static void usb_process_iface (usb_hid_iface_info_t *iface,
 				
 				// run even if not changed
 				user_io_digital_joystick(idx, jmap);
+
+				// new API with all extra buttons
+				user_io_digital_joystick_ext(idx, vjoy);
 				
 				// also send analog values
 				user_io_analog_joystick(idx, a[0]-128, a[1]-128);

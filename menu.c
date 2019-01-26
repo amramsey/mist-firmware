@@ -132,6 +132,8 @@ void NumJoysticksSet(unsigned char num) {
                               "mov r0, r0");
 
 unsigned char menustate = MENU_NONE1;
+unsigned char first_displayed_8bit = 0;
+unsigned char selected_drive_slot;
 unsigned char parentstate;
 unsigned char menusub = 0;
 unsigned char menusub_last = 0; //for when we allocate it dynamically and need to know last row
@@ -201,7 +203,7 @@ unsigned char config_autofire = 0;
 
 // file selection menu variables
 char fs_pFileExt[13] = "xxx";
-unsigned char fs_ExtLen = 0;
+unsigned char fs_ShowExt = 0;
 unsigned char fs_Options;
 unsigned char fs_MenuSelect;
 unsigned char fs_MenuCancel;
@@ -279,7 +281,7 @@ void SelectFile(char* pFileExt, unsigned char Options, unsigned char MenuSelect,
 
   iprintf("pFileExt = %3s\n", pFileExt);
   strcpy(fs_pFileExt, pFileExt);
-  fs_ExtLen = strlen(fs_pFileExt);
+  fs_ShowExt = (strlen(fs_pFileExt)>3 || strchr(fs_pFileExt, '*') || strchr(fs_pFileExt, '?'));
   //  fs_pFileExt = pFileExt;
   fs_Options = Options;
   fs_MenuSelect = MenuSelect;
@@ -705,6 +707,7 @@ void HandleUI(void)
 				menusub = 0;
 				OsdClear();
 				OsdEnable(DISABLE_KEYBOARD);
+				first_displayed_8bit = 0;
 			}
 			break;
 
@@ -797,24 +800,28 @@ void HandleUI(void)
 			if(!p[0]) OsdCoreNameSet("8BIT");
 			else      OsdCoreNameSet(p);
 
-			// check if there's a file type supported
-			p = user_io_8bit_get_string(1);
-			if(p && strlen(p)) {
-				entry = 1;
-				menumask = 3; //allow to choose "exit" at tht end
-				strcpy(s, " Load *.");
-				strcat(s, GetExt(p));
-				OsdWrite(0, s, menusub==0, 0);
-			}
-
 			// add options as requested by core
-			i = 2;
+			i = first_displayed_8bit + 1;
 			do {
 				char* pos;
 				unsigned long status = user_io_8bit_set_status(0,0);  // 0,0 gets status
-							
+
 				p = user_io_8bit_get_string(i);
-				//	  iprintf("Option %d: %s\n", i-1, p);
+				// iprintf("Option %d: %s\n", i-1, p);
+				// check if there's a file type supported
+				if(i == 1) {
+					if (p && strlen(p)) {
+						menumask = 1;
+						strcpy(s, " Load *.");
+						strcat(s, GetExt(p));
+						OsdWrite(entry, s, menusub==entry, 0);
+						entry++;
+					} else {
+						first_displayed_8bit = 1;
+					}
+					i++;
+					p = user_io_8bit_get_string(i);
+				}
 
 				// check for 'F'ile or 'S'D image strings
 				if(p && ((p[0] == 'F') || (p[0] == 'S'))) {
@@ -893,11 +900,15 @@ void HandleUI(void)
 					OsdCoreNameSet(s);
 				}
 				i++;
-			} while(p);
+			} while(p && entry<7);
 
 			// exit row
 			OsdWrite(7, STD_EXIT, menusub == entry, 0);
 			menusub_last=entry; //remember final row
+			if (entry<6 || (!(p = user_io_8bit_get_string(i)) || p[0] == 'V')) {
+				// set exit selectable if no option to scroll down
+				menumask = (menumask << 1) | 1;
+			}
 			
 			// clear rest of OSD
 			for(;entry<7;entry++) 
@@ -923,25 +934,22 @@ void HandleUI(void)
 				if (menusub==menusub_last) {
 					menustate = MENU_NONE1;
 				} else {
-				
-					char fs_present;
-					p = user_io_8bit_get_string(1);
-					fs_present = p && strlen(p);
-
 					// entry 0 = file selector
-					if(!menusub && fs_present) {
+					if(!(menusub + first_displayed_8bit)) {
 						p = user_io_8bit_get_string(1);
 
-					// use a local copy of "p" since SelectFile will destroy the buffer behind it
-					static char ext[13];
-					strncpy(ext, p, 13);
-					while(strlen(ext) < 3) strcat(ext, " ");
+						// use a local copy of "p" since SelectFile will destroy the buffer behind it
+						static char ext[13];
+						strncpy(ext, p, 13);
+						while(strlen(ext) < 3) strcat(ext, " ");
 						SelectFile(ext, SCAN_DIR | SCAN_LFN, MENU_8BIT_MAIN_FILE_SELECTED, MENU_8BIT_MAIN1, 1);
 					} else {
-						p = user_io_8bit_get_string(menusub + (fs_present?1:2));
+						p = user_io_8bit_get_string(menusub + first_displayed_8bit + 1);
 
 						if((p[0] == 'F')||(p[0] == 'S')) {
 							static char ext[13];
+							selected_drive_slot = 0;
+							if (p[1]>='0' && p[1]<='9') selected_drive_slot = p[1]-'0';
 							substrcpy(ext, p, 1);
 							while(strlen(ext) < 3) strcat(ext, " ");
 							SelectFile(ext, SCAN_DIR | SCAN_LFN, 
@@ -986,6 +994,16 @@ void HandleUI(void)
 			else if (right) {
 				menustate = MENU_8BIT_SYSTEM1;
 				menusub = 0;
+			} else if (menusub == 6 && down) {
+				p = user_io_8bit_get_string(menusub_last + first_displayed_8bit + 1);
+				if (p && strlen(p) && p[0] != 'V') {
+					first_displayed_8bit++;
+					menustate = MENU_8BIT_MAIN1;
+				}
+				// iprintf("Next hidden option %s\n", p);
+			} else if (!menusub && up) {
+				if (first_displayed_8bit) first_displayed_8bit--;
+				menustate = MENU_8BIT_MAIN1;
 			}
 			break;
 
@@ -999,7 +1017,7 @@ void HandleUI(void)
 		case MENU_8BIT_MAIN_IMAGE_SELECTED :
 			iprintf("Image selected: %s\n", file.name);
 			user_io_set_index(user_io_ext_idx(&file, fs_pFileExt)<<6 | (menusub+1));
-			user_io_file_mount(&file);
+			user_io_file_mount(&file, selected_drive_slot);
 			// select image for SD card
 			menustate = MENU_NONE1;
 			break;
@@ -2342,7 +2360,7 @@ void HandleUI(void)
 							{
 									file.long_name[0] = 0;
 									len = strlen(DirEntryLFN[sort_table[iSelectedEntry]]);
-									if ((len > 4) && (fs_ExtLen<=3))
+									if ((len > 4) && !fs_ShowExt)
 											if (DirEntryLFN[sort_table[iSelectedEntry]][len-4] == '.')
 													len -= 4; // remove extension
 
@@ -3509,7 +3527,7 @@ void ScrollLongName(void)
 		// FIXME - yuk, we don't want to do this every frame!
         len = strlen(DirEntryLFN[k]); // get name length
 
-        if((len > 4) && (fs_ExtLen<=3))
+        if((len > 4) && !fs_ShowExt)
             if (DirEntryLFN[k][len - 4] == '.')
                 len -= 4; // remove extension
 
@@ -3619,7 +3637,7 @@ void PrintDirectory(void)
 
                 if (!(DirEntry[k].Attributes & ATTR_DIRECTORY)) // if a file
                 {
-                if((len > 4) && (fs_ExtLen<=3))
+                if((len > 4) && !fs_ShowExt)
                     if (lfn[len-4] == '.')
                         len -= 4; // remove extension
 
@@ -3643,7 +3661,7 @@ void PrintDirectory(void)
             else  // no LFN
             {
                 strncpy(s + 1, (const char*)DirEntry[k].Name, 8); // if no LFN then display base name (8 chars)
-                if(((DirEntry[k].Attributes & ATTR_DIRECTORY) || (fs_ExtLen>3)) && DirEntry[k].Extension[0] != ' ')
+                if(((DirEntry[k].Attributes & ATTR_DIRECTORY) || fs_ShowExt) && DirEntry[k].Extension[0] != ' ')
                 {
                     p = (char*)&DirEntry[k].Name[7];
                     j = 8;

@@ -20,6 +20,7 @@
 #include "mmc.h"
 #include "tos.h"
 #include "errors.h"
+#include "ini_parser.h"
 
 // up to 16 key can be remapped
 #define MAX_REMAP  16
@@ -27,7 +28,10 @@ unsigned char key_remap_table[MAX_REMAP][2];
 
 #define BREAK  0x8000
 
-IDXFile sd_image;
+static IDXFile sd_image[2];
+static char buffer[512];
+static uint8_t buffer_drive_index = 0;
+static uint32_t buffer_lba = 0xffffffff;
 
 extern fileTYPE file;
 extern char s[40];
@@ -148,7 +152,8 @@ static void PollAdc() {
 void user_io_init() {
   // no sd card image selected, SD card accesses will go directly
   // to the card
-  sd_image.file.size = 0;
+  sd_image[0].file.size = 0;
+  sd_image[1].file.size = 0;
 
   if(video_keep != VIDEO_KEEP_VALUE) video_altered = 0;
   video_keep = 0;
@@ -293,7 +298,7 @@ void user_io_detect_core_type() {
       // check if there's a <core>.vhd present
       strcpy(s+8, "VHD");
       if (FileOpen(&file, s))
-	user_io_file_mount(&file);
+	user_io_file_mount(&file, 0);
 
     }
     
@@ -334,8 +339,8 @@ void user_io_analog_joystick(unsigned char joystick, char valueX, char valueY) {
 void user_io_digital_joystick(unsigned char joystick, unsigned char map) {
 	uint8_t state = map;
 	// "only" 6 joysticks are supported
-  if(joystick >= 6)
-    return;
+	if(joystick > 5)
+		return;
 	
 		// the physical joysticks (db9 ports at the right device side)
 		// as well as the joystick emulation are renumbered if usb joysticks
@@ -368,7 +373,7 @@ void user_io_digital_joystick(unsigned char joystick, unsigned char map) {
     return;
   }
 
-  //  iprintf("j%d: %x\n", joystick, map);
+	//iprintf("j%d: %x\n", joystick, map);
 
 		
 	// atari ST handles joystick 0 and 1 through the ikbd emulated by the io controller
@@ -384,6 +389,13 @@ void user_io_digital_joystick(unsigned char joystick, unsigned char map) {
     
 }
 
+void user_io_digital_joystick_ext(unsigned char joystick, uint16_t map) {
+	// "only" 6 joysticks are supported
+	if(joystick > 5) return;
+	//iprintf("ext j%d: %x\n", joystick, map);
+	spi_uio_cmd32(UIO_JOYSTICK0_EXT + joystick, 0x0000ffff & map);
+}
+
 static char dig2ana(char min, char max) {
   if(min && !max) return -128;
   if(max && !min) return  127;
@@ -393,6 +405,7 @@ static char dig2ana(char min, char max) {
 void user_io_joystick(unsigned char joystick, unsigned char map) {
   // digital joysticks also send analog signals
   user_io_digital_joystick(joystick, map);
+  user_io_digital_joystick_ext(joystick, map);
   user_io_analog_joystick(joystick, 
 		       dig2ana(map&JOY_LEFT, map&JOY_RIGHT),
 		       dig2ana(map&JOY_UP, map&JOY_DOWN));
@@ -458,12 +471,14 @@ void user_io_sd_set_config(void) {
 }
 
 // read 8+32 bit sd card status word from FPGA
-uint8_t user_io_sd_get_status(uint32_t *lba) {
+uint8_t user_io_sd_get_status(uint32_t *lba, uint8_t *drive_index) {
   uint32_t s;
   uint8_t c; 
 
+  *drive_index = 0;
   spi_uio_cmd_cont(UIO_GET_SDSTAT);
   c = spi_in();
+  if ((c & 0xf0) == 0x60) *drive_index = spi_in() & 0x01;
   s = spi_in();
   s = (s<<8) | spi_in();
   s = (s<<8) | spi_in();
@@ -589,13 +604,15 @@ void user_io_set_index(unsigned char index) {
   DisableFpga();
 }
 
-void user_io_file_mount(fileTYPE *file) {
-  iprintf("selected %.12s with %d bytes\n", file->name, file->size);
+void user_io_file_mount(fileTYPE *file, unsigned char index) {
+  iprintf("selected %.12s with %d bytes to slot %d\n", file->name, file->size, index);
 
-  memcpy(&sd_image.file, file, sizeof(fileTYPE));
+  memcpy(&sd_image[index].file, file, sizeof(fileTYPE));
 
   // build index for fast random access
-  IDXIndex(&sd_image);
+  IDXIndex(&sd_image[index]);
+  
+  buffer_lba = 0xffffffff;
   
   // send mounted image size first then notify about mounting
   EnableIO();
@@ -608,15 +625,11 @@ void user_io_file_mount(fileTYPE *file) {
   DisableIO();
 
   // notify core of possible sd image change
-  spi_uio_cmd8(UIO_SET_SDSTAT, 0);
+  spi_uio_cmd8(UIO_SET_SDSTAT, index);
 }
 
-void user_io_file_tx(fileTYPE *file, unsigned char index) {
-  unsigned long bytes2send = file->size;
-
-  /* transmit the entire file using one transfer */
-
-  iprintf("Selected file %.11s with %lu bytes to send for index %d\n", file->name, bytes2send, index);
+static void user_io_file_tx_prepare(unsigned char index) {
+  iprintf("Preparing transmission for index %d\n", index);
 
   // set index byte (0=bios rom, 1-n=OSD entry index)
   user_io_set_index(index);
@@ -627,13 +640,18 @@ void user_io_file_tx(fileTYPE *file, unsigned char index) {
   spi_write((void*)(DirEntry+sort_table[iSelectedEntry]), sizeof(DIRENTRY));
   DisableFpga();
 
-  //  hexdump(DirEntry+sort_table[iSelectedEntry], sizeof(DIRENTRY), 0);
-
   // prepare transmission of new file
   EnableFpga();
   SPI(UIO_FILE_TX);
   SPI(0xff);
   DisableFpga();
+}
+
+static void user_io_file_tx_send(fileTYPE *file) {
+  unsigned long bytes2send = file->size;
+  
+  /* transmit the entire file using one transfer */
+  iprintf("Selected file %.11s with %lu bytes to send\n", file->name, file->size);
 
   while(bytes2send) {
     iprintf(".");
@@ -657,7 +675,9 @@ void user_io_file_tx(fileTYPE *file, unsigned char index) {
     if(bytes2send)
       FileNextSector(file);
   }
+}
 
+static void user_io_file_tx_done(void) {
   // signal end of transmission
   EnableFpga();
   SPI(UIO_FILE_TX);
@@ -665,6 +685,12 @@ void user_io_file_tx(fileTYPE *file, unsigned char index) {
   DisableFpga();
 
   iprintf("\n");
+}
+
+void user_io_file_tx(fileTYPE *file, unsigned char index) {
+  user_io_file_tx_prepare(index);
+  user_io_file_tx_send(file);
+  user_io_file_tx_done();
 }
 
 // 8 bit cores have a config string telling the firmware how
@@ -1023,14 +1049,13 @@ void user_io_poll() {
 
     // sd card emulation
     {
-      static char buffer[512];
-      static uint32_t buffer_lba = 0xffffffff;
       uint32_t lba;
-      uint8_t c = user_io_sd_get_status(&lba);
+      uint8_t drive_index;
+      uint8_t c = user_io_sd_get_status(&lba, &drive_index);
 
-      // valid sd commands start with "5x" to avoid problems with
-      // cores that don't implement this command
-      if((c & 0xf0) == 0x50) {
+      // valid sd commands start with "5x" (old API), or "6x" (new API)
+      // to avoid problems with cores that don't implement this command
+      if((c & 0xf0) == 0x50 || (c & 0xf0) == 0x60) {
 
 #if 0
 	// debug: If the io controller reports and non-sdhc card, then
@@ -1078,11 +1103,10 @@ void user_io_poll() {
 	      iprintf("SD WR %d\n", lba);
 
 	    // if we write the sector stored in the read buffer, then
-	    // update the read buffer with the new contents
-	    if(buffer_lba == lba) 
-	      memcpy(buffer, wr_buf, 512);
-
-	      buffer_lba = 0xffffffff;
+	    // invalidate the cache
+	    if(buffer_lba == lba && buffer_drive_index == drive_index) {
+		buffer_lba = 0xffffffff;
+	    }
 
 	    // Fetch sector data from FPGA ...
 	    spi_uio_cmd_cont(UIO_SECTOR_WR);
@@ -1093,9 +1117,11 @@ void user_io_poll() {
 	    DISKLED_ON;
 
 #if 1
-	    if(sd_image.file.size) {
-	      IDXSeek(&sd_image, lba);
-	      IDXWrite(&sd_image, wr_buf);
+	    if(sd_image[drive_index].file.size) {
+		if(((sd_image[drive_index].file.size-1) >> 9) >= lba) {
+		    IDXSeek(&sd_image[drive_index], lba);
+		    IDXWrite(&sd_image[drive_index], wr_buf);
+		}
 	    } else
 	      MMC_Write(lba, wr_buf);
 #else
@@ -1110,14 +1136,20 @@ void user_io_poll() {
 
 	  if(user_io_dip_switch1())
 	    iprintf("SD RD %d\n", lba);
-	  
+
+	  // invalidate cache if it stores data from another drive
+	  if (drive_index != buffer_drive_index)
+	      buffer_lba = 0xffffffff;
+
 	  // are we using a file as the sd card image?
 	  // (C64 floppy does that ...)
 	  if(buffer_lba != lba) {
 	    DISKLED_ON;
-	    if(sd_image.file.size) {
-	      IDXSeek(&sd_image, lba);
-	      IDXRead(&sd_image, buffer);
+	    if(sd_image[drive_index].file.size) {
+		if(((sd_image[drive_index].file.size-1) >> 9) >= lba) {
+			IDXSeek(&sd_image[drive_index], lba);
+			IDXRead(&sd_image[drive_index], buffer);
+		}
 	    } else {
 	      // sector read
 	      // read sector from sd card if it is not already present in
@@ -1143,16 +1175,21 @@ void user_io_poll() {
 	  // just load the next sector now, so it may be prefetched
 	  // for the next request already
 	  DISKLED_ON;
-	  if(sd_image.file.size) {
-	    IDXSeek(&sd_image, lba+1);
-	    IDXRead(&sd_image, buffer);
+	  if(sd_image[drive_index].file.size) {
+	    // but check if it would overrun on the file
+	    if(((sd_image[drive_index].file.size-1) >> 9) > lba) {
+		IDXSeek(&sd_image[drive_index], lba+1);
+		IDXRead(&sd_image[drive_index], buffer);
+		buffer_lba = lba + 1;
+	    }
 	  } else {
 	    // sector read
 	    // read sector from sd card if it is not already present in
 	    // the buffer
 	    MMC_Read(lba+1, buffer);
+	    buffer_lba = lba+1;
 	  }
-	  buffer_lba = lba+1;
+	  buffer_drive_index = drive_index;
 	  DISKLED_OFF;
 	}
       }
@@ -1215,71 +1252,7 @@ void user_io_poll() {
 	mouse_pos[X] = mouse_pos[Y] = 0;
       }
     }
-    
-    // --------------- THE FOLLOWING IS DEPRECATED AND WILL BE REMOVED ------------
-    // ------------------------ USE SD CARD EMULATION INSTEAD ---------------------
 
-    // raw sector io for the atari800 core which include a full
-    // file system driver usually implemented using a second cpu
-    static unsigned long bit8_status = 0;
-    unsigned long status;
-
-    /* read status byte */
-    EnableFpga();
-    SPI(UIO_GET_STATUS);
-    status = SPI(0);
-    status = (status << 8) | SPI(0);
-    status = (status << 8) | SPI(0);
-    status = (status << 8) | SPI(0);
-    DisableFpga();
-
-    if(status != bit8_status) {
-      unsigned long sector = (status>>8)&0xffffff;
-      char buffer[512];
-
-      bit8_status = status;
-      
-      // sector read testing 
-      DISKLED_ON;
-
-      // sector read
-      if(((status & 0xff) == 0xa5) || ((status & 0x3f) == 0x29)) {
-
-	// extended command with 26 bits (for 32GB SDHC)
-	if((status & 0x3f) == 0x29) sector = (status>>6)&0x3ffffff;
-
-	bit8_debugf("SECIO rd %ld", sector);
-
-	if(MMC_Read(sector, buffer)) {
-	  // data is now stored in buffer. send it to fpga
-	  EnableFpga();
-	  SPI(UIO_SECTOR_SND);     // send sector data IO->FPGA
-	  spi_block_write(buffer);
-	  DisableFpga();
-	} else
-	  bit8_debugf("rd %ld fail", sector);
-      }
-
-      // sector write
-      if(((status & 0xff) == 0xa6) || ((status & 0x3f) == 0x2a)) {
-
-	// extended command with 26 bits (for 32GB SDHC)
-	if((status & 0x3f) == 0x2a) sector = (status>>6)&0x3ffffff;
-
-	bit8_debugf("SECIO wr %ld", sector);
-
-	// read sector from FPGA
-	EnableFpga();
-	SPI(UIO_SECTOR_RCV);     // receive sector data FPGA->IO
-	spi_block_read(buffer);
-	DisableFpga();
-
-	if(!MMC_Write(sector, buffer)) 
-	  bit8_debugf("wr %ld fail", sector);
-      }
-
-      DISKLED_OFF;
-    }
   }
 
   if(core_type == CORE_TYPE_ARCHIE) 
@@ -2076,3 +2049,99 @@ unsigned char user_io_ext_idx(fileTYPE *file, char* ext) {
 
 	return 0;
 }
+
+extern unsigned char nDirEntries;
+extern unsigned long iCurrentDirectory;    // cluster number of current directory, 0 for root
+
+// this should be moved into fat.c and be re-used for the menu functions as well
+void change_into_core_dir(void) {
+  char s[13];  // 8+3+'\0'
+  user_io_create_config_name(s);
+  
+  // try to change into subdir named after the core
+  strcpy(s+8, "   ");
+  iprintf("Trying to open work dir \"%s\"\n", s);
+  
+  ScanDirectory(SCAN_INIT, "",  SCAN_DIR | FIND_DIR);
+
+  // no return flag :(, so scan 10 times blindly...
+  for(;;) {
+    int i;
+    char res = 0;
+    unsigned short last_StartCluster = DirEntry[0].StartCluster;
+    
+    for(i=0;i<nDirEntries;i++) {
+      //iprintf("cmp %11s %11s\n", DirEntry[i].Name, s);
+      if(strncasecmp(DirEntry[i].Name, s, 11) == 0) {
+	ChangeDirectory(DirEntry[i].StartCluster + (fat32 ? (DirEntry[i].HighCluster & 0x0FFF) << 16 : 0));
+	res = 1;
+	break;
+      }
+    }
+    // found directory: stop searching
+    if(res) { iprintf("ok\n"); break; }
+
+    // last search returned less than 8 entries: Stop searching since 
+    // there sure aren't more
+    if(nDirEntries != 8) 
+      break;
+    
+    // get next 8 directory entries
+    iSelectedEntry = MAXDIRENTRIES -1;
+    ScanDirectory(SCAN_NEXT_PAGE, "",  SCAN_DIR | FIND_DIR);
+    
+    // if 8 entries are returned check if the start cluster of the first entry
+    // is the same as the first one in the previous list. If it is, then this
+    // is the same list and we are done
+    if((nDirEntries == 8) && (DirEntry[0].StartCluster == last_StartCluster)) 
+      break;
+  }
+}
+
+void user_io_rom_upload(char *rname, char mode) {
+  fileTYPE f;
+  static char first = 1;
+  char s[13];  // 8+3+'\0'
+
+  // new ini parsing starts, prepare uploads
+  if(mode == 0) {
+    first = 1;
+    return;
+  }
+
+  // ini parsing done
+  if(mode == 2) {
+    // has something been uploaded?
+    // -> then end transfer
+    if(!first) {
+      iprintf("upload ends\n");
+
+      user_io_file_tx_done();
+      user_io_8bit_set_status(0, UIO_STATUS_RESET);
+    }
+    return;
+  }
+    
+    
+  // try to change into core dir. Stay in root if that doesn't exist
+  change_into_core_dir();
+  
+  strcpy(s, "        ROM");
+  strncpy(s, rname, strlen(rname));
+  iprintf("rom upload '%s' %d\n", s, sizeof(f));
+
+  if (FileOpenDir(&f, s, iCurrentDirectory)) {
+    iprintf("file found!\n");
+
+    if(first) {    
+      // set reset
+      user_io_8bit_set_status(UIO_STATUS_RESET, UIO_STATUS_RESET);
+      user_io_file_tx_prepare(0);
+      first = 0;
+    }
+      
+    //    user_io_file_tx(&f, 0);
+    user_io_file_tx_send(&f);
+  } else
+    iprintf("file not found!\n");
+}	
