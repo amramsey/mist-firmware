@@ -18,24 +18,40 @@
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "fat.h"
+#include "fat_compat.h"
+
+#define SZ_TBL 1024
+#define SD_IMAGES 4
 
 typedef struct
 {
-	fileTYPE file;
-        unsigned long  index[1024];
-        unsigned long  index_size;
+	char valid;
+	FIL file;
+	DWORD clmt[SZ_TBL];
 } IDXFile;
 
+// sd_image slots:
+// Minimig:  0-3 - IDE
+// Atari ST: 0-1 - FDD
+//           2-3 - ACSI
+// Archie:   0-1 - IDE
+//           2-3 - FDD
+// 8 bit:    0-3 - Block access
+
+extern IDXFile sd_image[SD_IMAGES];
+
 static inline unsigned char IDXRead(IDXFile *file, unsigned char *pBuffer) {
-  return FileRead(&(file->file), pBuffer);
+  UINT br;
+  return f_read(&(file->file), pBuffer, 512, &br);
 }
 
 static inline unsigned char IDXWrite(IDXFile *file, unsigned char *pBuffer) {
-  return FileWrite(&(file->file), pBuffer);
+  UINT bw;
+  return f_write(&(file->file), pBuffer, 512, &bw);
 }
-  
-unsigned char IDXOpen(IDXFile *file, const char *name);
+
+unsigned char IDXOpen(IDXFile *file, const char *name, char mode);
+void IDXClose(IDXFile *file);
 unsigned char IDXSeek(IDXFile *file, unsigned long lba);
 void IDXIndex(IDXFile *pIDXF);
 

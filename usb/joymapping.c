@@ -1,3 +1,20 @@
+/*
+  This file is part of MiST-firmware
+
+  MiST-firmware is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 3 of the License, or
+  (at your option) any later version.
+
+  MiST-firmware is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
 /*  
 This file defines how to handle mapping in the MiST controllers in various ways:
 
@@ -95,11 +112,10 @@ void virtual_joystick_remap(char *s) {
       token  = strtok (s, ",");
       while(token!=NULL) {
         //if (count==0) joystick_mappers[i].vid = strtol(token, NULL, 16); -- VID mapping already done
-		value = strtol(token, NULL, 16);
+        value = strtol(token, NULL, 16);
         if (count==1) {
           joystick_mappers[i].pid = value;
-        } 
-        else {
+        } else if (count >= 2) {
             //parse sub-tokens sequentially and assign 16-bit value to them
             joystick_mappers[i].mapping[off+count-2] = value;
             hid_debugf("parsed: %x/%x %d -> %d", 
@@ -163,6 +179,12 @@ char* get_joystick_alias( uint16_t vid, uint16_t pid ) {
 	if(vid==0x040b && pid==0x6533)
 		return JOYSTICK_ALIAS_SPEEDLINK_COMP;
 	
+	if(vid==0x0738 && pid==0x2217)
+		return JOYSTICK_ALIAS_SPEEDLINK_COMP;
+
+	if(vid==0x045E && pid==0x028E)
+		return JOYSTICK_ALIAS_XBOX;
+
 	return JOYSTICK_ALIAS_NONE;
 		
 }
@@ -406,17 +428,16 @@ void joystick_key_map(char *s) {
 
 /*****************************************************************************/
 
-void virtual_joystick_keyboard ( uint16_t vjoy ) {
-	
-  // ignore if globally switched off
-  if(mist_cfg.joystick_disable_shortcuts)
-	  return;
-	
+bool virtual_joystick_keyboard ( uint16_t vjoy ) {
+	// ignore if globally switched off
+	if(mist_cfg.joystick_disable_shortcuts)
+		return false;
+
 	// use button combinations as shortcut for certain keys
-  uint8_t buf[6] = { 0,0,0,0,0,0 };
-	
-  // if OSD is open control it via USB joystick
-  if(user_io_osd_is_visible() && !mist_cfg.joystick_ignore_osd) {
+	uint8_t buf[6] = { 0,0,0,0,0,0 };
+
+	// if OSD is open control it via USB joystick
+	if(user_io_osd_is_visible() && !mist_cfg.joystick_ignore_osd) {
 		int idx = 0;
 		if(vjoy & JOY_A)     buf[idx++] = 0x28; // ENTER
 		if(vjoy & JOY_B)     buf[idx++] = 0x29; // ESC                
@@ -430,14 +451,21 @@ void virtual_joystick_keyboard ( uint16_t vjoy ) {
 			if (vjoy & JOY_SELECT || vjoy & JOY_L) buf[idx] = 0x4B; // page up
 			else buf[idx] = 0x52; // up arrow
 			if (idx < 6) idx++; //avoid overflow if we assigned 6 already
-		} 
+		}
+
 		if(vjoy & JOY_DOWN) {
 			if (vjoy & JOY_SELECT || vjoy & JOY_L) buf[idx] = 0x4E; // page down
 			else buf[idx] = 0x51; // down arrow
 			if (idx < 6) idx++; //avoid overflow if we assigned 6 already
-		}       
-		
-  } else {
+		}
+
+		if (!(vjoy & JOY_UP) && !(vjoy & JOY_DOWN)) {
+			if (vjoy & JOY_L) buf[idx++] = 0x56;// KP-
+			else
+			if (vjoy & JOY_R) buf[idx++] = 0x57;// KP+
+		}
+
+	} else {
 		
 		// shortcuts mapped if start is pressed (take priority)
 		if (vjoy & JOY_START) {
@@ -449,10 +477,10 @@ void virtual_joystick_keyboard ( uint16_t vjoy ) {
 			if(vjoy & JOY_R)       buf[idx++] = 0x3A; // F1
 			if(vjoy & JOY_SELECT)  buf[idx++] = 0x45;  //F12 // i.e. open OSD in most cores
 		} else {
-	
+
 			// shortcuts with SELECT - mouse emulation
 			if (vjoy & JOY_SELECT) {
-	  		//iprintf("joy2key SELECT is pressed\n");
+			//iprintf("joy2key SELECT is pressed\n");
 				unsigned char but = 0;
 				char a0 = 0;
 				char a1 = 0;
@@ -462,7 +490,7 @@ void virtual_joystick_keyboard ( uint16_t vjoy ) {
 				if (vjoy & JOY_RIGHT) a0 = 4;
 				if (vjoy & JOY_UP) a1 = -2;
 				if (vjoy & JOY_DOWN) a1 = 2;
-				user_io_mouse(but, a0, a1);
+				user_io_mouse(0, but, a0, a1, 0);
 			}
 	
 		}
@@ -475,7 +503,7 @@ void virtual_joystick_keyboard ( uint16_t vjoy ) {
 	uint8_t has_mapping = 0;
 	//uint8_t joy_buf[6] = { 0,0,0,0,0,0 };
 	for(i=0;i<MAX_JOYSTICK_KEYBOARD_MAP;i++) {
-	  if(vjoy & joy_key_map[i].mask) {
+		if(vjoy & joy_key_map[i].mask) {
 			has_mapping = 1;
 			//iprintf("joy2key:%d\n", joy_key_map[i].mask);
 			if (joy_key_map[i].modifier) {
@@ -497,7 +525,7 @@ void virtual_joystick_keyboard ( uint16_t vjoy ) {
 					//iprintf("joy2key hit:%d\n", joy_key_map[i].keys[j]);
 				}
 			}
-	  }
+		}
 	}
 	// generate key events but only if no other keys were pressed
 	if (has_mapping && mapped_hit) {
@@ -505,4 +533,6 @@ void virtual_joystick_keyboard ( uint16_t vjoy ) {
 	} else {
 		user_io_kbd(0x00, buf, UIO_PRIORITY_GAMEPAD, 0, 0); 
 	}
+
+	return (buf[0] ? true : false);
 }

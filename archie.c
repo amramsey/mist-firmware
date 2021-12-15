@@ -3,31 +3,28 @@
 #include "hardware.h"
 
 #include "menu.h"
+#include "osd.h"
 #include "archie.h"
+#include "hdd.h"
+#include "user_io.h"
+#include "data_io.h"
 #include "debug.h"
 
-#define MAX_FLOPPY  4
-
 #define CONFIG_FILENAME  "ARCHIE  CFG"
+#define MAX_FLOPPY 2
 
 typedef struct {
   unsigned long system_ctrl;     // system control word
-  char rom_img[12];              // rom image file name
+  char rom_img[64];              // rom image file name
+  char cmos_img[64];             // cmos image file name
+  hardfileTYPE  hardfile[2];
 } archie_config_t;
 
 static archie_config_t config;
 
-fileTYPE floppy[MAX_FLOPPY];
+static char floppy_name[MAX_FLOPPY][64];
 
-#define ARCHIE_FILE_TX         0x53
-#define ARCHIE_FILE_TX_DAT     0x54
-#define ARCHIE_FDC_GET_STATUS  0x55
-#define ARCHIE_FDC_TX_DATA     0x56
-#define ARCHIE_FDC_SET_STATUS  0x57
-
-#define archie_debugf(a, ...) iprintf("\033[1;31mARCHIE: " a "\033[0m\n", ##__VA_ARGS__)
-// #define archie_debugf(a, ...)
-#define archie_x_debugf(a, ...) iprintf("\033[1;32mARCHIE: " a "\033[0m\n", ##__VA_ARGS__)
+extern char s[FF_LFN_BUF + 1];
 
 enum state { STATE_HRST, STATE_RAK1, STATE_RAK2, STATE_IDLE, 
 	     STATE_WAIT4ACK1, STATE_WAIT4ACK2, STATE_HOLD_OFF } kbd_state;
@@ -69,145 +66,87 @@ static unsigned char flags;
 static unsigned long hold_off_timer;
 #endif
 
-static void nice_name(char *dest, char *src) {
-  char *c;
-
-  // copy and append nul
-  strncpy(dest, src, 8);
-  for(c=dest+7;*c==' ';c--); c++;
-  *c++ = '.';
-  strncpy(c, src+8, 3);
-  for(c+=2;*c==' ';c--); c++;
-  *c++='\0';
-}
-
 static char buffer[17];  // local buffer to assemble file name (8+.+3+\0)
 
 char *archie_get_rom_name(void) {
-  nice_name(buffer, config.rom_img);
-  return buffer;
+  return config.rom_img;
+}
+
+char *archie_get_cmos_name(void) {
+  return config.cmos_img;
 }
 
 char *archie_get_floppy_name(char i) {
-  if(!floppy[i].size) 
-    strcpy(buffer, "* no disk *");
-  else
-    nice_name(buffer, floppy[i].name);
 
-  return buffer;
+  if(!floppy_name[i][0]) {
+    strcpy(buffer, "* no disk *");
+    return buffer;
+  } else
+    return (floppy_name[i]);
 }
 
 void archie_save_config(void) {
-  fileTYPE file;
+  FIL file;
+  UINT bw;
 
   // save configuration data
-  if (FileOpen(&file, CONFIG_FILENAME))  {
-    archie_debugf("Existing conf file size: %lu", file.size);
-    if(file.size != sizeof(archie_config_t)) {
-      file.size = sizeof(archie_config_t);
-      if (!UpdateEntry(&file))
-	return;
-    }
+  if (FileOpenCompat(&file, CONFIG_FILENAME, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK)  {
+    f_write(&file, &config, sizeof(archie_config_t), &bw);
+    f_close(&file);
+  }
+}
+
+void archie_set_floppy(char i, const unsigned char *name) {
+
+  user_io_file_mount(name, i);
+  if (user_io_is_mounted(i)) {
+    strncpy(floppy_name[i], name, sizeof(floppy_name[i]));
+    floppy_name[i][sizeof(floppy_name[i])-1] = 0;
   } else {
-    archie_debugf("Creating new config");
-    strncpy(file.name, CONFIG_FILENAME, 11);
-    file.attributes = 0;
-    file.size = sizeof(archie_config_t);
-    if(!FileCreate(0, &file)) {
-      archie_debugf("File creation failed.");
-      return;
-    }
+    floppy_name[i][0] = 0;
   }
-
-  // finally write the config
-  memcpy(sector_buffer, &config, sizeof(archie_config_t));
-  FileWrite(&file, sector_buffer);
 }
 
-void archie_send_file(unsigned char id, fileTYPE *file) {
-  archie_debugf("Sending file with id %d", id);
+void archie_save_cmos() {
+  FIL file;
 
-  // prepare transmission of new file
-  EnableFpga();
-  SPI(ARCHIE_FILE_TX);
-  SPI(id);
-  DisableFpga();
-
-  unsigned long time = GetTimer(0);
-
-  iprintf("[");
-
-  unsigned short i, blocks = file->size/512;
-  for(i=0;i<blocks;i++) {
-    if(!(i & 127)) iprintf("*");
-
-    DISKLED_ON;
-    FileRead(file, sector_buffer);
-    DISKLED_OFF;
-
-    EnableFpga();
-    SPI(ARCHIE_FILE_TX_DAT);
-    spi_block_write(sector_buffer);
-    DisableFpga();
-    
-    // still bytes to send? read next sector
-    if(i != blocks-1)
-      FileNextSector(file);
+  archie_debugf("Saving CMOS file");
+  strcpy(s, "/");
+  strcat(s, config.cmos_img);
+  if (f_open(&file, s, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
+    data_io_file_rx(&file, 0x03, 256);
+    f_close(&file);
   }
-
-  iprintf("]\n");
-
-  time = GetTimer(0) - time;
-  archie_debugf("Uploaded in %lu ms", time >> 20);
-
-  // signal end of transmission
-  EnableFpga();
-  SPI(ARCHIE_FILE_TX);
-  SPI(0x00);
-  DisableFpga();
 }
 
-void archie_fdc_set_status(void) {
-  int i;
+void archie_set_cmos(const unsigned char *name) {
+  FIL file;
 
-  // send status bytes for all four possible floppies
-  EnableFpga();
-  SPI(ARCHIE_FDC_SET_STATUS);
-  for(i=0;i<MAX_FLOPPY;i++) {
-    unsigned char floppy_status = 0x00;
-    if(floppy[i].size) floppy_status |= 1;
-    SPI(floppy_status);
-  }
-  DisableFpga();
+  if (!name) return;
+  if(f_open(&file, name, FA_READ) == FR_OK) {
+    archie_debugf("CMOS file %s with %llu bytes to send", name, f_size(&file));
+    // save file name
+    strncpy(config.cmos_img, name, sizeof(config.cmos_img));
+    config.cmos_img[sizeof(config.cmos_img)-1] = 0;
+    data_io_file_tx(&file, 0x03, 0);
+    f_close(&file);
+  } else
+    archie_debugf("CMOS %.s no found", name);
 }
 
-void archie_set_floppy(char i, fileTYPE *file) {
-  if(!file) {
-    archie_debugf("Floppy %d eject", i);
-    floppy[i].size = 0;
-  } else {
-    archie_debugf("Floppy %d insert %.11s", i, file->name);
-    floppy[i] = *file;
-  }
-  
-  // update floppy status in fpga
-  archie_fdc_set_status();
-}
+void archie_set_rom(const unsigned char *name) {
+  FIL file;
 
-char archie_floppy_is_inserted(char i) {
-  return(floppy[i].size != 0);
-}
-
-void archie_set_rom(fileTYPE *file) {
-  if(!file) return;
-
-  archie_debugf("ROM file %.11s with %lu bytes to send", 
-		file->name, file->size);
-
-  // save file name
-  memcpy(config.rom_img, file->name, 11);
-
-  archie_send_file(0x01, file);
+  if (!name) return;
+  if(f_open(&file, name, FA_READ) == FR_OK) {
+    archie_debugf("ROM file %s with %llu bytes to send", name, f_size(&file));
+    // save file name
+    strncpy(config.rom_img, name, sizeof(config.rom_img));
+    config.rom_img[sizeof(config.rom_img)-1] = 0;
+    data_io_file_tx(&file, 0x01, 0);
+    f_close(&file);
+  } else
+    archie_debugf("ROM %.11s no found", name);
 }
 
 static void archie_kbd_enqueue(unsigned char state, unsigned char byte) {
@@ -249,50 +188,67 @@ static void archie_kbd_reset(void) {
 }
 
 void archie_init(void) {
-  fileTYPE file;
+  FIL file;
+  UINT br;
   char i;
 
   archie_debugf("init");
 
+  ResetMenu();
+  ChangeDirectoryName("/");
+
   // set config defaults
   config.system_ctrl = 0;
-  strcpy(config.rom_img, "RISCOS  ROM");
+  strcpy(config.rom_img, "RISCOS.ROM");
+  strcpy(config.cmos_img, "CMOS.RAM");
+
+  config.hardfile[0].enabled = HDF_FILE;
+  strcpy(config.hardfile[0].name, "ARCHIE1.HDF");
+  config.hardfile[1].enabled = HDF_FILE;
+  strcpy(config.hardfile[1].name, "ARCHIE2.HDF");
 
   // try to load config from card
-  if(FileOpen(&file, CONFIG_FILENAME)) {
-    if(file.size == sizeof(archie_config_t)) {
-      FileRead(&file, sector_buffer);
-      memcpy(&config, sector_buffer, sizeof(archie_config_t));
-    } else
-      archie_debugf("Unexpected config size %d != %d", 
-		    file.size, sizeof(archie_config_t));
+  if(FileOpenCompat(&file, CONFIG_FILENAME, FA_READ) == FR_OK) {
+    if(f_size(&file) == sizeof(archie_config_t))
+      f_read(&file, &config, sizeof(archie_config_t), &br);
+    else
+      archie_debugf("Unexpected config size %d != %d", f_size(&file), sizeof(archie_config_t));
+    f_close(&file);
   } else
     archie_debugf("No %.11s config found", CONFIG_FILENAME);
 
   // upload rom file
-  if(FileOpen(&file, config.rom_img))
-    archie_set_rom(&file);
-  else 
-    archie_debugf("ROM %.11s no found", config.rom_img);
+  archie_set_rom(config.rom_img);
 
   // upload ext file
-  if(FileOpen(&file, "RISCOS  EXT")) {
+  if(FileOpenCompat(&file, "RISCOS  EXT", FA_READ) == FR_OK) {
     archie_debugf("Found RISCOS.EXT, uploading it");
-    archie_send_file(0x02, &file);
+    data_io_file_tx(&file, 0x02, 0);
+    f_close(&file);
   } else 
     archie_debugf("RISCOS.EXT no found");
 
+  // upload cmos file
+  archie_set_cmos(config.cmos_img);
+
   // try to open default floppies
   for(i=0;i<MAX_FLOPPY;i++) {
-    char fdc_name[] = "FLOPPY0 ADF";
+    char fdc_name[] = "FLOPPY0.ADF";
     fdc_name[6] = '0'+i;
-    if (FileOpen(&floppy[i], fdc_name))  
-      archie_debugf("Inserted floppy %d with %d bytes", i, floppy[i].size);
-    else
-      floppy[i].size = 0;
+    user_io_file_mount(fdc_name, i);
+    if (user_io_is_mounted(i)) {
+      strcpy(floppy_name[i], fdc_name);
+      archie_debugf("Inserted floppy %d", i);
+    } else
+      floppy_name[i][0] = 0;
   }
-  // update floppy status in fpga
-  archie_fdc_set_status();
+
+  // open hdd image(s)
+  hardfile[0] = &config.hardfile[0];
+  hardfile[1] = &config.hardfile[1];
+
+  OpenHardfile(0);
+  OpenHardfile(1);
 
   archie_kbd_send(STATE_RAK1, HRST);
   ack_timeout = GetTimer(20);  // give archie 20ms to reply
@@ -447,18 +403,20 @@ void archie_handle_kbd(void) {
 
       // arm acks first byte
     case BACK:
-      if(kbd_state != STATE_WAIT4ACK1) 
-	archie_debugf("KBD unexpected BACK");
-
+      if(kbd_state != STATE_WAIT4ACK1) {
+          archie_debugf("KBD unexpected BACK, resetting KBD");
+          kbd_state = STATE_HRST;
+      } else {
 #ifdef HOLD_OFF_TIME
-      // wait some time before sending next byte
-      archie_debugf("KBD starting hold off");
-      kbd_state = STATE_HOLD_OFF;
-      hold_off_timer = GetTimer(10);
+          // wait some time before sending next byte
+          archie_debugf("KBD starting hold off");
+          kbd_state = STATE_HOLD_OFF;
+          hold_off_timer = GetTimer(10);
 #else
-      kbd_state = STATE_IDLE;
-      archie_check_queue();
+          kbd_state = STATE_IDLE;
+          archie_check_queue();
 #endif
+      }
       break;
 
       // arm acks second byte
@@ -502,78 +460,134 @@ void archie_handle_kbd(void) {
     DisableIO();
 }
 
-static unsigned char fdc_buffer[1024];
+void archie_handle_hdd(void) {
+  unsigned char  c1;
 
-void archie_handle_fdc(void) {
-  static unsigned char old_status[4] = {0,0,0,0};
-  unsigned char status[4];
-
-  // read status
   EnableFpga();
-  SPI(ARCHIE_FDC_GET_STATUS);
-  status[0] = SPI(0);
-  status[1] = SPI(0);
-  status[2] = SPI(0);
-  status[3] = SPI(0);
+  c1 = SPI(0); // cmd request
+  SPI(0);
+  SPI(0);
+  SPI(0);
+  SPI(0);
+  SPI(0);
   DisableFpga();
 
-  if(memcmp(status, old_status, 4) != 0) {
-    archie_x_debugf("status changed to %x %x %x %x", 
-		  status[0], status[1], status[2], status[3]);
-    memcpy(old_status, status, 4);
-
-    // top four bits must be magic marker 1010
-    if(((status[0] & 0xf0) == 0xa0) && (status[0] & 1)) {
-      archie_x_debugf("DIO: BUSY with commmand %lx", status[1]);
-	  
-      // check for read sector command
-      if((status[1] & 0xe0) == 0x80) {	
-	if(status[0] & 2) {
-	  int floppy_map = status[3] >> 4;
-	  int side = (status[2]&0x80)?0:1;
-	  int track = status[2] & 0x7f;
-	  int sector = status[3] & 0x0f;
-	  unsigned long lba = 2 * (10*track + 5*side + sector);
-	  int floppy_index = -1;
-	  
-	  // allow only single floppy drives to be selected
-	  int i;
-	  for(i=0;i<MAX_FLOPPY;i++) 
-	    if(floppy_map == (0x0f^(1<<i)))
-	      floppy_index = i;
-
-	  if(floppy_index < 0)
-	    archie_x_debugf("DIO: unexpected floppy_map %x", floppy_map); 
-	  else {
-	    fileTYPE *f = &floppy[floppy_index];
-
-	    archie_x_debugf("DIO: floppy %d sector read SD%d T%d S%d -> %ld", 
-			    floppy_index, side, track, sector, lba);
-	    
-	    if(!f->size)
-	      archie_x_debugf("DIO: floppy not inserted. Core should not do this!!"); 
-	    else {
-	      DISKLED_ON;
-	      // read two consecutive sectors 
-	      FileSeek(f, lba, SEEK_SET);
-	      FileRead(f, fdc_buffer);
-	      FileNextSector(f);
-	      FileRead(f, fdc_buffer+512);
-	      DISKLED_OFF;
-	      
-	      EnableFpga();
-	      SPI(ARCHIE_FDC_TX_DATA);
-	      spi_write(fdc_buffer, 1024);
-	      DisableFpga();
-	    }
-	  }
-	}
-      }
-    }
-  }
+  HandleHDD(c1, 0, 0);
 }
 
 void archie_poll(void) {
   archie_handle_kbd();
-  archie_handle_fdc();
+  archie_handle_hdd();
+}
+
+//////////////////////////
+////// Archie menu ///////
+//////////////////////////
+static char archie_file_selected(uint8_t idx, const char *SelectedName) {
+	switch(idx) {
+		case 0:
+		case 1:
+			archie_set_floppy(idx, SelectedName);
+			break;
+		case 2:
+			archie_set_rom(SelectedName);
+			break;
+		case 3:
+			archie_set_cmos(SelectedName);
+			break;
+	}
+	return 0;
+}
+
+static char archie_getmenupage(uint8_t idx, char action, menu_page_t *page) {
+	if (action == MENU_PAGE_EXIT) return 0;
+	page->title = "Archie";
+	page->flags = OSD_ARROW_RIGHT;
+	page->timer = 0;
+	page->stdexit = MENU_STD_EXIT;
+	return 0;
+}
+
+static char archie_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
+	item->stipple = 0;
+	item->active = 1;
+	item->page = 0;
+	item->newpage = 0;
+	item->newsub = 0;
+	if (action == MENU_ACT_RIGHT) {
+		SetupSystemMenu();
+		return 0;
+	}
+
+	switch (action) {
+		case MENU_ACT_GET:
+			switch(idx) {
+				case 0:
+					strcpy(s, " Floppy 0: ");
+					strcat(s, archie_get_floppy_name(0));
+					item->item = s;
+					break;
+				case 1:
+					strcpy(s, " Floppy 1: ");
+					strcat(s, archie_get_floppy_name(1));
+					item->item = s;
+					break;
+				case 2:
+					strcpy(s, "   OS ROM: ");
+					strcat(s, archie_get_rom_name());
+					item->item = s;
+					break;
+				case 3:
+					strcpy(s, " CMOS RAM: ");
+					strcat(s, archie_get_cmos_name());
+					item->item = s;
+					break;
+				case 4:
+					item->item = " Save CMOS RAM";
+					break;
+				case 5:
+					item->item = " Save config";
+					break;
+				default:
+					item->active = 0;
+					return 0;
+			}
+			break;
+		case MENU_ACT_SEL:
+			switch(idx) {
+				case 0:  // Floppy 0
+				case 1:  // Floppy 1
+					if(user_io_is_mounted(idx)) {
+						archie_set_floppy(idx, NULL);
+					} else
+						SelectFileNG("ADF", SCAN_DIR | SCAN_LFN, archie_file_selected, 1);
+					break;
+				case 2:  // Load ROM
+					SelectFileNG("ROM", SCAN_LFN, archie_file_selected, 0);
+					break;
+
+				case 3:  // Load CMOS
+					SelectFileNG("RAM", SCAN_LFN, archie_file_selected, 0);
+					break;
+
+				case 4:  // Save CMOS
+					archie_save_cmos();
+					break;
+
+				case 5:  // Save config
+					archie_save_config();
+					break;
+				default:
+					return 0;
+			}
+			break;
+		default:
+			return 0;
+	}
+	return 1;
+}
+
+void archie_setup_menu()
+{
+	SetupMenu(archie_getmenupage, archie_getmenuitem);
 }

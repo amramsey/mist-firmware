@@ -25,7 +25,7 @@ static uint16_t rx_cnt;
 static unsigned char tx_buf[4+MAX_FRAMELEN];
 static uint16_t tx_cnt, tx_offset;
 
-static bool eth_present = 0;
+bool eth_present = 0;
 
 // currently only AX88772 is supported as that's the only
 // device i have
@@ -43,6 +43,10 @@ static const struct {
   { 0x2001, 0x1a02, ASIX_TYPE_AX88772 },
   // NoName Wii Adapter
   { 0x0b95, 0x7720, ASIX_TYPE_AX88772 },
+  // Asix Fast Ethernet Adapter AX88772A
+  { 0x0b95, 0x772A, ASIX_TYPE_AX88772 },
+  // NoName Adapter 88772B
+  { 0x0b95, 0x772B, ASIX_TYPE_AX88772 },
   // Apple USB Adapter A1277
   { 0x05ac, 0x1402, ASIX_TYPE_AX88772 },
   { 0, 0, 0 }
@@ -330,7 +334,7 @@ static uint8_t usb_asix_init(usb_device_t *dev) {
     return USB_DEV_CONFIG_ERROR_DEVICE_NOT_SUPPORTED;
 
   // reset status
-  info->qNextIrqPollTime = info->qNextBulkPollTime = 0;
+  info->qNextIrqPollTime = info->qNextBulkPollTime = info->qNextMACSendTime = 0;
   info->bPollEnable = false;
   info->linkDetected = false;
 
@@ -529,6 +533,17 @@ static uint8_t usb_asix_poll(usb_device_t *dev) {
 
   if (!info->bPollEnable)
     return 0;
+
+  // poll for MAC address and send it to the FPGA in every 2 secs
+  if (info->qNextMACSendTime <= timer_get_msec()) {
+    if ((rcode = asix_read_cmd(dev, AX_CMD_READ_NODE_ID,
+       0, 0, ETH_ALEN, info->mac)) != 0) {
+      return rcode;
+    }
+
+    user_io_eth_send_mac(info->mac);
+    info->qNextMACSendTime = timer_get_msec() + 2000;
+  }
 
   // poll interrupt endpoint
   if (info->qNextIrqPollTime <= timer_get_msec()) {

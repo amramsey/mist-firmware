@@ -17,7 +17,7 @@ typedef struct {
   char* name;
 } ini_section_t;
 
-typedef enum {UINT8=0, INT8, UINT16, INT16, UINT32, INT32, 
+typedef enum {UINT8=0, INT8, UINT16, INT16, UINT32, INT32, UINT64, INT64,
 #ifdef INI_ENABLE_FLOAT
 	      FLOAT, 
 #endif
@@ -29,8 +29,8 @@ typedef struct {
   char* name;
   void* var;
   ini_vartypes_t type;
-  int min;
-  int max;
+  uint64_t min;
+  uint64_t max;
   int section_id;
 } ini_var_t;
 
@@ -44,9 +44,8 @@ typedef struct {
 
 
 //// functions ////
-void ini_parse(const ini_cfg_t* cfg);
+void ini_parse(const ini_cfg_t* cfg, const char *alter_section);
 void ini_save(const ini_cfg_t* cfg);
-void ini_rom_upload(char *s);
 
 #endif // __INI_PARSER_H__
 

@@ -1,7 +1,7 @@
 #ifndef TOS_H
 #define TOS_H
 
-#include "fat.h"
+#include "fat_compat.h"
 
 // FPGA spi cmommands
 #define MIST_INVALID      0x00
@@ -80,23 +80,25 @@
 
 #define TOS_CONTROL_VIKING        0x10000000   // Viking graphics card
 
+#define TOS_CONTROL_BLEND         0x20000000   // Composite blending
+
 unsigned long tos_system_ctrl(void);
 
-void tos_upload(char *);
+void tos_upload(const char *);
 void tos_poll();
 void tos_update_sysctrl(unsigned long);
 char *tos_get_disk_name(char);
 char tos_disk_is_inserted(char index);
-void tos_insert_disk(char i, fileTYPE *file);
+void tos_insert_disk(char i, const unsigned char *name);
 void tos_eject_all();
-void tos_select_hdd_image(char i, fileTYPE *file);
+void tos_select_hdd_image(char i, const unsigned char *name);
 void tos_set_direct_hdd(char on);
 char tos_get_direct_hdd();
 void tos_reset(char cold);
 char *tos_get_image_name();
 char *tos_get_cartridge_name();
 char tos_cartridge_is_inserted();
-void tos_load_cartridge(char *);
+void tos_load_cartridge(const char *);
 
 void tos_set_video_adjust(char axis, char value);
 char tos_get_video_adjust(char axis);
@@ -104,7 +106,9 @@ char tos_get_video_adjust(char axis);
 char tos_get_cdc_control_redirect(void);
 void tos_set_cdc_control_redirect(char mode);
 
-void tos_config_init(void);
-void tos_config_save(void);
+void tos_config_load(char slot); // slot -1 == last config
+void tos_config_save(char slot);
+char tos_config_exists(char slot);
 
+void tos_setup_menu();
 #endif

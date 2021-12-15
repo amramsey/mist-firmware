@@ -4,6 +4,7 @@
 #ifndef __HDD_H__
 #define __HDD_H__
 
+#include "idxfile.h"
 
 // defines
 #define CMD_IDECMD  0x04
@@ -46,39 +47,37 @@
 #define HDF_FILETYPE_RDB      2
 #define HDF_FILETYPE_DOS      3
 
+#define HARDFILES 4
 
 // types
 typedef struct
 {
+    unsigned char enabled; // 0: Disabled, 1: Hard file, 2: MMC (entire card), 3-6: Partition 1-4 of MMC card
+    unsigned char present;
+    char name[64];
+} hardfileTYPE;
+
+typedef struct
+{
   int             type; // are we using a file, the entire SD card or a partition on the SD card?
-  fileTYPE        file;
+  IDXFile         *idxfile;
   unsigned short  cylinders;
   unsigned short  heads;
   unsigned short  sectors;
   unsigned short  sectors_per_block;
   unsigned short  partition; // partition no.
   long            offset; // if a partition, the lba offset of the partition.  Can be negative if we've synthesized an RDB.
-  unsigned long   index[1024];
-  unsigned long   index_size;
 } hdfTYPE;
 
 // variables
-extern char debugmsg[40];
-extern char debugmsg2[40];
-extern hdfTYPE hdf[2];
-
+extern hardfileTYPE *hardfile[HARDFILES];
+extern hdfTYPE hdf[HARDFILES];
 
 // functions
-void IdentifyDevice(unsigned short *pBuffer, unsigned char unit);
-unsigned long chs2lba(unsigned short cylinder, unsigned char head, unsigned short sector, unsigned char unit);
-void WriteTaskFile(unsigned char error, unsigned char sector_count, unsigned char sector_number, unsigned char cylinder_low, unsigned char cylinder_high, unsigned char drive_head);
-void WriteStatus(unsigned char status);
-void HandleHDD(unsigned char c1, unsigned char c2);
+void HandleHDD(unsigned char c1, unsigned char c2, unsigned char cs1ena);
 void GetHardfileGeometry(hdfTYPE *hdf);
-void BuildHardfileIndex(hdfTYPE *hdf);
-unsigned char HardFileSeek(hdfTYPE *hdf, unsigned long lba);
 unsigned char OpenHardfile(unsigned char unit);
-unsigned char GetHDFFileType(char *filename);
+unsigned char GetHDFFileType(const char *filename);
 
 
 #endif // __HDD_H__

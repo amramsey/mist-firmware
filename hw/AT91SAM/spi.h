@@ -4,9 +4,8 @@
 #include "AT91SAM7S256.h"
 #include <inttypes.h>
 
-#define RAMFUNC __attribute__ ((long_call, section (".ramsection")))
-
 #include "hardware.h"
+#include "attrs.h"
 
 /* main init functions */
 void spi_init(void);
@@ -14,6 +13,8 @@ void spi_slow();
 void spi_fast();
 void spi_fast_mmc();
 RAMFUNC void spi_wait4xfer_end();
+unsigned char spi_get_speed();
+void spi_set_speed(unsigned char speed);
 
 /* chip select functions */
 void EnableFpga(void);
@@ -29,6 +30,7 @@ RAMFUNC void DisableCard();
 unsigned char spi_in();
 void spi8(unsigned char parm);
 void spi16(unsigned short parm);
+void spi16le(unsigned short parm);
 void spi24(unsigned long parm);
 void spi32(unsigned long parm);
 void spi32le(unsigned long parm);
@@ -37,8 +39,8 @@ void spi_n(unsigned char value, unsigned short cnt);
 /* block transfer functions */
 RAMFUNC void spi_block_read(char *addr);
 RAMFUNC void spi_read(char *addr, uint16_t len);
-void spi_block_write(char *addr);
-void spi_write(char *addr, uint16_t len);
+void spi_block_write(const char *addr);
+void spi_write(const char *addr, uint16_t len);
 void spi_block(unsigned short num);
 
 /* OSD related SPI functions */
@@ -57,10 +59,11 @@ void spi_uio_cmd(unsigned char cmd);
 void spi_uio_cmd8(unsigned char cmd, unsigned char parm);
 void spi_uio_cmd8_cont(unsigned char cmd, unsigned char parm);
 void spi_uio_cmd32(unsigned char cmd, unsigned long parm);
+void spi_uio_cmd64(unsigned char cmd, unsigned long long parm);
   
 /* spi functions for max3421 */
-#define spi_max_start()  { *AT91C_PIOA_CODR = USB_SEL; }
-#define spi_max_end()    {  spi_wait4xfer_end(); *AT91C_PIOA_SODR = USB_SEL; }
+void spi_max_start();
+void spi_max_end();
 
 static inline unsigned char SPI(unsigned char outByte) {
   while (!(*AT91C_SPI_SR & AT91C_SPI_TDRE));

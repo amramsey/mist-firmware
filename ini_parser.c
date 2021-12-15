@@ -13,15 +13,14 @@
 #include "ini_parser.h"
 #ifndef INI_PARSER_TEST
 #include "debug.h"
-#include "fat.h"
+#include "fat_compat.h"
 #endif
-#include "user_io.h"
 
 //// defines ////
 #define INI_EOT                 4 // End-Of-Transmission
 
 #define INI_BUF_SIZE            512
-#define INI_LINE_SIZE           65
+#define INI_LINE_SIZE           140
 
 #define INI_SECTION_START       '['
 #define INI_SECTION_END         ']'
@@ -34,7 +33,7 @@
 #define CHAR_IS_ALPHA_UPPER(c)  (((c) >= 'A') && ((c) <= 'Z'))
 #define CHAR_IS_ALPHA(c)        (CHAR_IS_ALPHA_LOWER(c) || CHAR_IS_ALPHA_UPPER(c))
 #define CHAR_IS_ALPHANUM(c)     (CHAR_IS_ALPHA_LOWER(c) || CHAR_IS_ALPHA_UPPER(c) || CHAR_IS_NUM(c))
-#define CHAR_IS_SPECIAL(c)      (((c) == '[') || ((c) == ']') || ((c) == '-') || ((c) == '_') || ((c) == ',') || ((c) == '='))
+#define CHAR_IS_SPECIAL(c)      (((c) == '[') || ((c) == ']') || ((c) == '-') || ((c) == '_') || ((c) == ',') || ((c) == '=') || ((c) == '~'))
 #define CHAR_IS_VALID(c)        (CHAR_IS_ALPHANUM(c) || CHAR_IS_SPECIAL(c))
 #define CHAR_IS_WHITESPACE(c)   (((c) == ' ') || ((c) == '\t') || ((c) == '\r') || ((c) == '\n'))
 #define CHAR_IS_SPACE(c)        (((c) == ' ') || ((c) == '\t'))
@@ -56,66 +55,54 @@ FILE* ini_fp = NULL;
 char  sector_buffer[INI_BUF_SIZE] = {0};
 int   ini_size=0;
 #else
-fileTYPE ini_file;
+FIL   ini_file;
 #endif
 
-int ini_pt = 0;
-
-// call user_io_rom_upload but reload sector_buffer afterwards since the io
-// operations in user_io_rom_upload may have overwritten the buffer
-// mode = 0: prepare for rom upload, mode = 1: rom upload, mode = 2, end rom upload
-void ini_rom_upload(char *s) {
-#ifndef INI_PARSER_TEST
-  user_io_rom_upload(s, 1);
-
-  FileRead(&ini_file, sector_buffer);
-#endif
-}
+static int ini_pt = 0;
 
 //// ini_getch() ////
-char ini_getch()
+static char ini_getch()
 {
-  if ((ini_pt&0x3ff) == 0x200) {
+  UINT br;
+  if (!(ini_pt&0x1ff)) {
     // reload buffer
     #ifdef INI_PARSER_TEST
     fread(sector_buffer, sizeof(char), INI_BUF_SIZE, ini_fp);
     #else
-    FileNextSector(&ini_file);
-    FileRead(&ini_file, sector_buffer);
+    f_read(&ini_file, sector_buffer, 512, &br);
     #endif
   }
 
   #ifdef INI_PARSER_TEST
   if (ini_pt >= ini_size) return 0;
   #else
-  if (ini_pt >= ini_file.size) return 0;
+  if (ini_pt >= f_size(&ini_file)) return 0;
   #endif
   else return sector_buffer[(ini_pt++)&0x1ff];
 }
 
 
 //// ini_putch() ////
-int ini_putch(char c)
+static void ini_putch(char c)
 {
-  static int ini_pt = 0;
+  UINT bw;
 
   sector_buffer[ini_pt++] = c;
 
-  if ((ini_pt%0x3ff) == 0x200) {
+  if (!(ini_pt%0x1ff)) {
     // write buffer
     ini_pt = 0;
     #ifdef INI_PARSER_TEST
     fwrite(sector_buffer, sizeof(char), INI_BUF_SIZE, ini_fp);
     #else
-    //#error
+    f_write(&ini_file, sector_buffer, INI_BUF_SIZE, &bw);
     #endif
   }
-  return ini_pt;
 }
 
 
 //// ini_findch() ////
-char ini_findch(char c)
+static char ini_findch(char c)
 {
   char t;
   do {
@@ -126,20 +113,19 @@ char ini_findch(char c)
 
 
 //// ini_getline() ////
-int ini_getline(char* line)
+static int ini_getline(char* line)
 {
   char c;
   char ignore=0;
   char literal=0;
   int i=0;
 
-  while(i<(INI_LINE_SIZE-1)) {
+  while(1) {
     c = ini_getch();
     if ((!c) || CHAR_IS_LINEEND(c)) break;
-    else if (CHAR_IS_QUOTE(c)) literal ^= 1;
+    else if (CHAR_IS_QUOTE(c) && !ignore) literal ^= 1;
     else if (CHAR_IS_COMMENT(c) && !ignore && !literal) ignore++;
-    else if (literal) line[i++] = c;
-    else if (CHAR_IS_VALID(c) && !ignore) line[i++] = c;
+    else if ((literal || (CHAR_IS_VALID(c) && !ignore)) && i<(INI_LINE_SIZE-1)) line[i++] = c;
   }
   line[i] = '\0';
   return c==0 ? INI_EOT : literal ? 1 : 0;
@@ -147,43 +133,18 @@ int ini_getline(char* line)
 
 
 //// ini_putline() ////
-int ini_putline(char* line)
+static void ini_putline(char* line)
 {
-  int ini_pt, i=0;
+  int i=0;
 
   while(i<(INI_LINE_SIZE-1)) {
     if (!line[i]) break;
-    ini_pt = ini_putch(line[i++]);
+    ini_putch(line[i++]);
   }
-  return ini_pt;
-}
-
-char *get_core_name()
-{
-  switch(user_io_core_type())
-  {
-	case CORE_TYPE_MINIMIG:
-	case CORE_TYPE_MINIMIG2:
-		return "MINIMIG";
-
-	case CORE_TYPE_PACE:
-		return "PACE";
-
-	case CORE_TYPE_MIST:
-		return "ST";
-
-	case CORE_TYPE_ARCHIE:
-		return "ARCHIE";
-
-	case CORE_TYPE_8BIT:
-		return user_io_get_core_name();
-  }
-
-  return "";
 }
 
 //// ini_get_section() ////
-int ini_get_section(const ini_cfg_t* cfg, char* buf)
+static int ini_get_section(const ini_cfg_t* cfg, char* buf, const char* alter_section)
 {
   int i=0;
 
@@ -218,14 +179,17 @@ int ini_get_section(const ini_cfg_t* cfg, char* buf)
     }  
   }
 
-  if(!strcmp(buf, get_core_name())) return cfg->sections[0].id;
-  
+  if(alter_section && !strcasecmp(buf, alter_section)) {
+    ini_parser_debugf("Got ALTER SECTION '%s' with ID %d", buf, cfg->sections[0].id);
+    return cfg->sections[0].id;
+  }
+
   return INI_SECTION_INVALID_ID;
 }
 
 
 //// ini_get_var() ////
-void* ini_get_var(const ini_cfg_t* cfg, int cur_section, char* buf)
+static void* ini_get_var(const ini_cfg_t* cfg, int cur_section, char* buf)
 {
   int i=0, j=0;
   int var_id = -1;
@@ -262,8 +226,8 @@ void* ini_get_var(const ini_cfg_t* cfg, int cur_section, char* buf)
         break;
       case INT8:
         *(int8_t*)(cfg->vars[var_id].var) = strtol(&(buf[i]), NULL, 0);
-        if (*(int8_t*)(cfg->vars[var_id].var) > cfg->vars[var_id].max) *(int8_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].max;
-        if (*(int8_t*)(cfg->vars[var_id].var) < cfg->vars[var_id].min) *(int8_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].min;
+        if (*(int8_t*)(cfg->vars[var_id].var) > (int8_t)cfg->vars[var_id].max) *(int8_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].max;
+        if (*(int8_t*)(cfg->vars[var_id].var) < (int8_t)cfg->vars[var_id].min) *(int8_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].min;
         break;
       case UINT16:
         *(uint16_t*)(cfg->vars[var_id].var) = strtoul(&(buf[i]), NULL, 0);
@@ -272,8 +236,8 @@ void* ini_get_var(const ini_cfg_t* cfg, int cur_section, char* buf)
         break;
       case INT16:
         *(int16_t*)(cfg->vars[var_id].var) = strtol(&(buf[i]), NULL, 0);
-        if (*(int16_t*)(cfg->vars[var_id].var) > cfg->vars[var_id].max) *(int16_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].max;
-        if (*(int16_t*)(cfg->vars[var_id].var) < cfg->vars[var_id].min) *(int16_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].min;
+        if (*(int16_t*)(cfg->vars[var_id].var) > (int16_t)cfg->vars[var_id].max) *(int16_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].max;
+        if (*(int16_t*)(cfg->vars[var_id].var) < (int16_t)cfg->vars[var_id].min) *(int16_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].min;
         break;
       case UINT32:
         *(uint32_t*)(cfg->vars[var_id].var) = strtoul(&(buf[i]), NULL, 0);
@@ -282,8 +246,18 @@ void* ini_get_var(const ini_cfg_t* cfg, int cur_section, char* buf)
         break;
       case INT32:
         *(int32_t*)(cfg->vars[var_id].var) = strtol(&(buf[i]), NULL, 0);
-        if (*(int32_t*)(cfg->vars[var_id].var) > cfg->vars[var_id].max) *(int32_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].max;
-        if (*(int32_t*)(cfg->vars[var_id].var) < cfg->vars[var_id].min) *(int32_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].min;
+        if (*(int32_t*)(cfg->vars[var_id].var) > (int32_t)cfg->vars[var_id].max) *(int32_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].max;
+        if (*(int32_t*)(cfg->vars[var_id].var) < (int32_t)cfg->vars[var_id].min) *(int32_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].min;
+        break;
+      case UINT64:
+        *(uint64_t*)(cfg->vars[var_id].var) = strtoull(&(buf[i]), NULL, 0);
+        if (*(uint64_t*)(cfg->vars[var_id].var) > (uint64_t)cfg->vars[var_id].max) *(uint64_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].max;
+        if (*(uint64_t*)(cfg->vars[var_id].var) < (uint64_t)cfg->vars[var_id].min) *(uint64_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].min;
+        break;
+      case INT64:
+        *(int64_t*)(cfg->vars[var_id].var) = strtoll(&(buf[i]), NULL, 0);
+        if (*(int64_t*)(cfg->vars[var_id].var) > (int64_t)cfg->vars[var_id].max) *(int64_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].max;
+        if (*(int64_t*)(cfg->vars[var_id].var) < (int64_t)cfg->vars[var_id].min) *(int64_t*)(cfg->vars[var_id].var) = cfg->vars[var_id].min;
         break;
 #ifdef INI_ENABLE_FLOAT
       case FLOAT:
@@ -297,7 +271,7 @@ void* ini_get_var(const ini_cfg_t* cfg, int cur_section, char* buf)
         break;
       case CUSTOM_HANDLER:
         ((custom_handler_t*)(cfg->vars[var_id].var))(&(buf[i]));
-	break;
+        break;
     }
     return (void*)(&(cfg->vars[var_id].var));
   }
@@ -307,22 +281,19 @@ void* ini_get_var(const ini_cfg_t* cfg, int cur_section, char* buf)
 
 
 //// ini_parse() ////
-void ini_parse(const ini_cfg_t* cfg)
+void ini_parse(const ini_cfg_t* cfg, const char *alter_section)
 {
   char line[INI_LINE_SIZE] = {0};
   int section = INI_SECTION_INVALID_ID;
   int line_status;
 
-  ini_parser_debugf("Start INI parser for core \"%s\".", get_core_name());
-
-  user_io_rom_upload(NULL, 0);   // prepare upload
+  ini_parser_debugf("Start INI parser for core \"%s\".", alter_section);
 
   // open ini file
   #ifdef INI_PARSER_TEST
   if ((ini_fp = fopen(cfg->filename, "rb")) == NULL) { 
   #else
-  memset(&ini_file, 0, sizeof(ini_file));
-  if (!FileOpen(&ini_file, cfg->filename)) {
+  if (f_open(&ini_file, cfg->filename, FA_READ) != FR_OK) {
   #endif
     ini_parser_debugf("Can't open file %s !", cfg->filename);
     return;
@@ -338,17 +309,10 @@ void ini_parse(const ini_cfg_t* cfg)
   #ifdef INI_PARSER_TEST
   ini_parser_debugf("Opened file %s with size %d bytes.", cfg->filename, ini_size);
   #else
-  ini_parser_debugf("Opened file %s with size %d bytes.", cfg->filename, ini_file.size);
+  ini_parser_debugf("Opened file %s with size %llu bytes.", cfg->filename, f_size(&ini_file));
   #endif
 
   ini_pt = 0;
-
-  // preload buffer
-  #ifdef INI_PARSER_TEST
-  fread(sector_buffer, sizeof(char), INI_BUF_SIZE, ini_fp);
-  #else
-  FileRead(&ini_file, sector_buffer);
-  #endif
 
   // parse ini
   while (1) {
@@ -359,7 +323,7 @@ void ini_parse(const ini_cfg_t* cfg)
     if (line_status != 1) {
       if (line[0] == INI_SECTION_START) {
         // if first char in line is INI_SECTION_START, get section
-        section = ini_get_section(cfg, line);
+        section = ini_get_section(cfg, line, alter_section);
       } else {
         // otherwise this is a variable, get it
         ini_get_var(cfg, section, line);
@@ -372,23 +336,24 @@ void ini_parse(const ini_cfg_t* cfg)
   #ifdef INI_PARSER_TEST
   // close file
   fclose(ini_fp);
+  #else
+  f_close(&ini_file);
   #endif
-
-  user_io_rom_upload(NULL, 2);   // upload done
 }
 
 
 //// ini_save() ////
 void ini_save(const ini_cfg_t* cfg)
 {
-  int section, var, ini_pt;
+  int section, var;
   char line[INI_LINE_SIZE] = {0};
 
+  ini_pt = 0;
   // open ini file
   #ifdef INI_PARSER_TEST
   if ((ini_fp = fopen(cfg->filename, "wb")) == NULL) {
   #else
-  { //#error
+  if (f_open(&ini_file, cfg->filename, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
   #endif
     ini_parser_debugf("Can't open file %s !", cfg->filename);
     return;
@@ -398,19 +363,28 @@ void ini_save(const ini_cfg_t* cfg)
   for (section=0; section<cfg->nsections; section++) {
     ini_parser_debugf("writing section %s ...", cfg->sections[section].name);
     siprintf(line, "[%s]\n", cfg->sections[section].name);
-    ini_pt = ini_putline(line);
+
+    ini_putline(line);
     // loop over vars
     for (var=0; var<cfg->nvars; var++) {
       if (cfg->vars[var].section_id == cfg->sections[section].id) {
         ini_parser_debugf("writing var %s", cfg->vars[var].name);
         switch (cfg->vars[var].type) {
           case UINT8:
+            siprintf(line, "%s=%u\n", cfg->vars[var].name, *(uint8_t*)(cfg->vars[var].var));
+            break;
           case UINT16:
+            siprintf(line, "%s=%u\n", cfg->vars[var].name, *(uint16_t*)(cfg->vars[var].var));
+            break;
           case UINT32:
             siprintf(line, "%s=%u\n", cfg->vars[var].name, *(uint32_t*)(cfg->vars[var].var));
             break;
           case INT8:
+            siprintf(line, "%s=%d\n", cfg->vars[var].name, *(int8_t*)(cfg->vars[var].var));
+            break;
           case INT16:
+            siprintf(line, "%s=%d\n", cfg->vars[var].name, *(int16_t*)(cfg->vars[var].var));
+            break;
           case INT32:
             siprintf(line, "%s=%d\n", cfg->vars[var].name, *(int32_t*)(cfg->vars[var].var));
             break;
@@ -423,9 +397,10 @@ void ini_save(const ini_cfg_t* cfg)
             siprintf(line, "%s=\"%s\"\n", cfg->vars[var].name, (char*)(cfg->vars[var].var));
             break;
         }
-        ini_pt = ini_putline(line);
+        ini_putline(line);
       }
     }
+
   }
 
   // in case the buffer is not written yet, write it now
@@ -433,8 +408,16 @@ void ini_save(const ini_cfg_t* cfg)
     #ifdef INI_PARSER_TEST
     fwrite(sector_buffer, sizeof(char), ini_pt, ini_fp);
     #else
-    //#error
+    UINT bw;
+    f_write(&ini_file, sector_buffer, ini_pt, &bw);
     #endif
   }
+
+  #ifdef INI_PARSER_TEST
+  fclose(ini_fp);
+  #else
+  f_close(&ini_file);
+  #endif
+
 }
 

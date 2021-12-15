@@ -28,13 +28,13 @@
 
 // -------------- TOS debugging --------------
 
-#if 1
+#if 0
 #define tos_debugf(a, ...) iprintf("\033[1;32mTOS: " a "\033[0m\n", ##__VA_ARGS__)
 #else
 #define tos_debugf(...)
 #endif
 
-#if 1
+#if 0
 // ikbd debug output in red
 #define IKBD_DEBUG
 #define ikbd_debugf(a, ...) iprintf("\033[1;31mIKBD: " a "\033[0m\n", ##__VA_ARGS__)
@@ -49,9 +49,22 @@
 #define bit8_debugf(...)
 #endif
 
-// ------------ usb debugging -----------
-
+// ------------ Archie debugging ------------
 #if 0
+#define archie_debugf(a, ...) iprintf("\033[1;31mARCHIE: " a "\033[0m\n", ##__VA_ARGS__)
+#else
+#define archie_debugf(...)
+#endif
+
+// ------------ usb debugging -----------
+#if 0
+// usb debug output in green
+#define usb_debugf(a, ...) iprintf("\033[1;32mUSB: " a "\033[0m\n", ##__VA_ARGS__)
+#else
+#define usb_debugf(...)
+#endif
+
+#if 1
 #define hidp_debugf(a, ...)  iprintf("\033[1;34mHIDP: " a "\033[0m\n", ##__VA_ARGS__)
 #else
 #define hidp_debugf(...)
@@ -71,7 +84,7 @@
 #define hid_debugf(...)
 #endif
 
-#if 1
+#if 0
 // usb mass storage debug output in purple
 #define storage_debugf(a, ...) iprintf("\033[1;35mSTORAGE: " a "\033[0m\n", ##__VA_ARGS__)
 #else
@@ -85,7 +98,7 @@
 #define usbrtc_debugf(...)
 #endif
 
-#if 1
+#if 0
 // usb rts debug output in blue
 #define pl2303_debugf(a, ...) iprintf("\033[1;34mPL2303: " a "\033[0m\n", ##__VA_ARGS__)
 #else
@@ -97,6 +110,20 @@
 #define ini_parser_debugf(a, ...) iprintf("\033[1;34mINI_PARSER : " a "\033[0m\n",## __VA_ARGS__)
 #else
 #define ini_parser_debugf(...)
+#endif
+
+#if 0
+// cue_parser debug output
+#define cue_parser_debugf(a, ...) iprintf("\033[1;34mCUE_PARSER : " a "\033[0m\n",## __VA_ARGS__)
+#else
+#define cue_parser_debugf(...)
+#endif
+
+#if 0
+// pcecd debug output
+#define pcecd_debugf(a, ...) iprintf("\033[1;34mPCECD : " a "\033[0m\n",## __VA_ARGS__)
+#else
+#define pcecd_debugf(...)
 #endif
 
 #endif // DEBUG_H

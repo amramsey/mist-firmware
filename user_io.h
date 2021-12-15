@@ -7,7 +7,7 @@
 #define USER_IO_H
 
 #include <inttypes.h>
-#include "fat.h"
+#include "fat_compat.h"
 
 #define UIO_STATUS      0x00
 #define UIO_BUT_SW      0x01
@@ -23,8 +23,8 @@
 // directions (in/out) are from an io controller view
 #define UIO_IKBD_OUT    0x02
 #define UIO_IKBD_IN     0x03
-#define UIO_SERIAL_OUT  0x04
-#define UIO_SERIAL_IN   0x05
+#define UIO_SERIAL_OUT  0x04  // Warning! same as UIO_MOUSE
+#define UIO_SERIAL_IN   0x05  // Warning! same as UIO_KEYBOARD
 #define UIO_PARALLEL_IN 0x06
 #define UIO_MIDI_OUT    0x07
 #define UIO_MIDI_IN     0x08
@@ -33,13 +33,15 @@
 #define UIO_ETH_FRM_IN  0x0b
 #define UIO_ETH_FRM_OUT 0x0c
 #define UIO_SERIAL_STAT 0x0d
+#define UIO_KEYBOARD_IN 0x0e  // PS2 keyboard cmd
+#define UIO_MOUSE_IN    0x0f  // PS2 mouse cmd
 
 #define UIO_JOYSTICK2   0x10  // also used by minimig and 8 bit
 #define UIO_JOYSTICK3   0x11  // -"-
 #define UIO_JOYSTICK4   0x12  // -"-
 #define UIO_JOYSTICK5   0x13  // -"-
 
-// codes as currently used by 8bit only
+// general codes used by 8bit, archie and mist2
 #define UIO_GET_STRING  0x14
 #define UIO_SET_STATUS  0x15
 #define UIO_GET_SDSTAT  0x16  // read status of sd card emulation
@@ -52,6 +54,9 @@
 #define UIO_SET_SDINFO  0x1d  // send info about mounted image
 #define UIO_SET_STATUS2 0x1e  // 32bit status
 #define UIO_GET_KBD_LED 0x1f  // keyboard LEDs control
+#define UIO_SIO_OUT     0x20  // serial out
+#define UIO_SET_MOD     0x21  // send core variant from metadata (ARC) file
+#define UIO_SET_RTC     0x22  // send real-time-clock data
 
 // extended joystick control (32 bit value)
 #define UIO_JOYSTICK0_EXT   0x60
@@ -61,14 +66,19 @@
 #define UIO_JOYSTICK4_EXT   0x64
 #define UIO_JOYSTICK5_EXT   0x65
 
+// extended mouse control (with wheel support)
+#define UIO_MOUSE0_EXT      0x70
+#define UIO_MOUSE1_EXT      0x71
+
 // codes as used by 8bit (atari 800, zx81) via SS2
 #define UIO_GET_STATUS  0x50 // removed
 #define UIO_SECTOR_SND  0x51 // removed
 #define UIO_SECTOR_RCV  0x52 // removed
-#define UIO_FILE_TX     0x53
-#define UIO_FILE_TX_DAT 0x54
-#define UIO_FILE_INDEX  0x55
-#define UIO_FILE_INFO   0x56
+
+#define UIO_GET_FEATS   0x80 // get core features (only once after fpga init)
+
+#define FEAT_MENU       0x01 // menu core
+#define FEAT_PCECD      0x02 // call pcecd_poll()
 
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02
@@ -100,6 +110,12 @@
 #define JOY_L3     0x4000
 #define JOY_R3     0x8000
 
+// Right stick
+#define JOY_RIGHT2      0x010000
+#define JOY_LEFT2       0x020000
+#define JOY_DOWN2       0x040000
+#define JOY_UP2         0x080000
+
 // keyboard LEDs control 
 #define KBD_LED_CAPS_CONTROL  0x01
 #define KBD_LED_CAPS_STATUS   0x02
@@ -115,6 +131,8 @@
 
 #define CONF_SCANDOUBLER_DISABLE 0x10
 #define CONF_YPBPR               0x20
+#define CONF_CSYNC_DISABLE       0x40
+#define CONF_SDRAM64             0x80
 
 // core type value should be unlikely to be returned by broken cores
 #define CORE_TYPE_UNKNOWN   0x55
@@ -125,6 +143,7 @@
 #define CORE_TYPE_8BIT      0xa4   // atari 800/c64 like core
 #define CORE_TYPE_MINIMIG2  0xa5   // new Minimig with AGA
 #define CORE_TYPE_ARCHIE    0xa6   // Acorn Archimedes
+#define CORE_TYPE_MIST2     0xa7   // New MiST core
 
 // user io status bits (currently only used by 8bit)
 #define UIO_STATUS_RESET   0x01
@@ -152,26 +171,28 @@ typedef struct {
   uint8_t fifo_stat;       // space in cores input fifo
 } __attribute__ ((packed)) serial_status_t;
 
+void user_io_reset();
 void user_io_init();
 void user_io_detect_core_type();
 unsigned char user_io_core_type();
+uint32_t user_io_get_core_features();
 char minimig_v1();
 char minimig_v2();
 char user_io_is_8bit_with_config_string();
 void user_io_poll();
-char user_io_menu_button();
-char user_io_button_dip_switch1();
-char user_io_user_button();
 void user_io_osd_key_enable(char);
 void user_io_serial_tx(char *, uint16_t);
 char *user_io_8bit_get_string(char);
-unsigned long user_io_8bit_set_status(unsigned long, unsigned long);
-void user_io_file_tx(fileTYPE *, unsigned char);
+unsigned long long user_io_8bit_set_status(unsigned long long, unsigned long long);
 void user_io_sd_set_config(void);
 char user_io_dip_switch1(void);
 char user_io_serial_status(serial_status_t *, uint8_t);
-void user_io_file_mount(fileTYPE *, unsigned char);
+char user_io_is_mounted(unsigned char index);
+void user_io_file_mount(const unsigned char*, unsigned char);
+char user_io_is_cue_mounted();
+char user_io_cue_mount(const unsigned char*);
 char *user_io_get_core_name();
+void user_io_set_core_mod(char);
 
 // io controllers interface for FPGA ethernet emulation using usb ethernet
 // devices attached to the io controller (ethernec emulation)
@@ -181,30 +202,22 @@ void user_io_eth_send_rx_frame(uint8_t *, uint16_t);
 void user_io_eth_receive_tx_frame(uint8_t *, uint16_t);
 
 // hooks from the usb layer
-void user_io_mouse(unsigned char b, char x, char y);
+void user_io_mouse(unsigned char idx, unsigned char b, char x, char y, char z);
 void user_io_kbd(unsigned char m, unsigned char *k, uint8_t priority, unsigned short vid, unsigned short pid);
-char user_io_create_config_name(char *s);
+#define CONFIG_ROOT 1   // create config filename in the root directory
+#define CONFIG_VHD  2   // create config filename according to VHD= in arc file
+char user_io_create_config_name(char *s, const char *ext, char flags);
 void user_io_digital_joystick(unsigned char, unsigned char);
-void user_io_digital_joystick_ext(unsigned char, uint16_t);
-void user_io_analog_joystick(unsigned char, char, char);
+void user_io_digital_joystick_ext(unsigned char, uint32_t);
+void user_io_analog_joystick(unsigned char, char, char, char, char);
 char user_io_osd_is_visible();
 void user_io_send_buttons(char);
 
 void user_io_key_remap(char *);
 void add_modifiers(uint8_t mod, uint16_t* keys_ps2);
 
-void user_io_set_index(unsigned char index);
-unsigned char user_io_ext_idx(fileTYPE *, char*);
+unsigned char user_io_ext_idx(const char*, const char*);
 
-// called when a rom entry is found in the mist.ini
-void user_io_rom_upload(char *s, char mode);
-
-#define USB_LOAD_VAR   *(int*)(0x0020FF04)
-#define USB_LOAD_VAR   *(int*)(0x0020FF04)
-#define USB_LOAD_VALUE 12345678
-
-#define DEBUG_MODE_VAR    *(int*)(0x0020FF08)
-#define DEBUG_MODE_VALUE  87654321
-#define DEBUG_MODE        (DEBUG_MODE_VAR == DEBUG_MODE_VALUE)
+void user_io_change_into_core_dir(void);
 
 #endif // USER_IO_H

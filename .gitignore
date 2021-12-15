@@ -19,3 +19,14 @@
 
 # ignore directories
 
+firmware.bin
+firmware.elf
+firmware.hex
+firmware.map
+firmware.upg
+mkupg
+initest
+cuetest
+fattest
+crt.lst
+

@@ -37,33 +37,37 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // 2010-08-15   - support for joystick emulation
 // 2010-08-18   - clean-up
 
-#include "AT91SAM7S256.h"
 #include "stdio.h"
 #include "string.h"
 #include "errors.h"
 #include "hardware.h"
 #include "mmc.h"
-#include "fat.h"
+#include "fat_compat.h"
 #include "osd.h"
 #include "fpga.h"
 #include "fdd.h"
 #include "hdd.h"
-#include "firmware.h"
+#include "config.h"
 #include "menu.h"
 #include "user_io.h"
+#include "arc_file.h"
+#include "font.h"
 #include "tos.h"
-#include "cdc_control.h"
 #include "usb.h"
 #include "debug.h"
 #include "mist_cfg.h"
-#include "cdc_enumerate.h"
+#include "usbdev.h"
+#include "cdc_control.h"
+#include "storage_control.h"
+
+#ifndef _WANT_IO_LONG_LONG
+#error "newlib lacks support of long long type in IO functions. Please use a toolchain that was compiled with option --enable-newlib-io-long-long."
+#endif
 
 const char version[] = {"$VER:ATH" VDATE};
 
-extern hdfTYPE hdf[2];
-
 unsigned char Error;
-char s[40];
+char s[FF_LFN_BUF + 1];
 
 void FatalError(unsigned long error) {
   unsigned long i;
@@ -78,7 +82,7 @@ void FatalError(unsigned long error) {
       WaitTimer(250);
     }
     WaitTimer(1000);
-	*AT91C_RSTC_RCR = 0xA5 << 24 | AT91C_RSTC_PERRST | AT91C_RSTC_PROCRST | AT91C_RSTC_EXTRST; // reset
+    MCUReset();
   }
 }
 
@@ -95,7 +99,7 @@ void HandleFpga(void) {
   DisableFpga();
   
   HandleFDD(c1, c2);
-  HandleHDD(c1, c2);
+  HandleHDD(c1, c2, 1);
   
   UpdateDriveStatus();
 }
@@ -104,7 +108,6 @@ extern void inserttestfloppy();
 
 int main(void)
 {
-    uint8_t tmp;
     uint8_t mmc_ok = 0;
 
 #ifdef __GNUC__
@@ -132,8 +135,7 @@ int main(void)
 
     // TODO: If MMC fails try to wait for USB storage
 
-    tmp = MCLK / ((AT91C_SPI_CSR[0] & AT91C_SPI_SCBR) >> 8) / 1000000;
-    iprintf("spiclk: %u MHz\r", tmp);
+    iprintf("spiclk: %u MHz\r", GetSPICLK());
 
     usb_init();
 
@@ -159,28 +161,44 @@ int main(void)
     if (!FindDrive())
         FatalError(2);
 
-    ChangeDirectory(DIRECTORY_ROOT);
+    ChangeDirectoryName("/");
+
+    arc_reset();
+
+    font_load();
 
     user_io_init();
 
     // tos config also contains cdc redirect settings used by minimig
-    tos_config_init();
+    tos_config_load(-1);
 
-    fpga_init(NULL);
+    char mod = 0;
 
-    cdc_control_open();
+    if((USB_LOAD_VAR != USB_LOAD_VALUE) && !user_io_dip_switch1())
+        mod = arc_open("/CORE.ARC");
 
-    usb_cdc_open();
+    if(mod < 0 || !strlen(arc_get_rbfname())) {
+        fpga_init(NULL); // error opening default ARC, try with default RBF
+    } else {
+        user_io_set_core_mod(mod);
+        strncpy(s, arc_get_rbfname(), sizeof(s)-5);
+        strcat(s,".RBF");
+        fpga_init(s);
+    }
+
+    usb_dev_open();
 
     while (1) {
       cdc_control_poll();
+      storage_control_poll();
 
       user_io_poll();
 
       usb_poll();
 
       // MIST (atari) core supports the same UI as Minimig
-      if(user_io_core_type() == CORE_TYPE_MIST) {
+      if((user_io_core_type() == CORE_TYPE_MIST) ||
+         (user_io_core_type() == CORE_TYPE_MIST2)) {
 	if(!fat_medium_present()) 
 	  tos_eject_all();
 

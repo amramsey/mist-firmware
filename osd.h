@@ -38,8 +38,10 @@
 #define OSD_CMD_MEM       0x24
 #define OSD_CMD_VID       0x34
 #define OSD_CMD_FLP       0x44
-#define OSD_CMD_HDD       0x54
+#define OSD_CMD_HDD0      0x54
+#define OSD_CMD_HDD1      0x58
 #define OSD_CMD_JOY       0x64
+#define OSD_CMD_FEATURES  0x74
 #define OSD_CMD_OSD_WR    0x0c
 #define OSD_CMD_WR        0x1c
 #define OSD_CMD_VERSION   0x88
@@ -120,6 +122,7 @@ void ConfigChipset(unsigned char chipset);
 void ConfigFloppy(unsigned char drives, unsigned char speed);
 void ConfigIDE(unsigned char gayle, unsigned char master, unsigned char slave);
 void ConfigAutofire(unsigned char autofire);
+void ConfigFeatures(unsigned char audiofiltermode, unsigned char powerledoffstate);
 unsigned char OsdGetCtrl(void);
 void OsdDisableMenuButton(unsigned char disable);
 unsigned char GetASCIIKey(unsigned char c);
@@ -127,7 +130,7 @@ void OSD_PrintText(unsigned char line, char *text, unsigned long start, unsigned
 void OsdWriteDoubleSize(unsigned char n, char *s, unsigned char pass);
 //void OsdDrawLogo(unsigned char n, char row);
 void OsdDrawLogo(unsigned char n, char row,char superimpose);
-void ScrollText(char n,const char *str, int len, int max_len,unsigned char invert);
+void ScrollText(char n, const char *str, int len, int max_len, unsigned char invert, int len_offset);
 void ScrollReset();
 void StarsInit();
 void StarsUpdate();

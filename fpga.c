@@ -22,17 +22,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // 2009-12-10   - changed command header id
 // 2010-04-14   - changed command header id
 
-#ifdef __GNUC__
-#include "AT91SAM7S256.h"
-#endif
-
 #include "stdio.h"
 #include "string.h"
 #include "errors.h"
 #include "hardware.h"
-#include "fat.h"
 #include "fdd.h"
-#include "rafile.h"
 #include "user_io.h"
 #include "config.h"
 #include "boot.h"
@@ -40,6 +34,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "fpga.h"
 #include "tos.h"
 #include "mist_cfg.h"
+
+uint8_t rstval = 0;
 
 #define CMD_HDRID 0xAACA
 
@@ -49,9 +45,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                               "mov r0, r0\n\t" \
                               "mov r0, r0");
 
-extern fileTYPE file;
-extern char s[40];
+extern char s[FF_LFN_BUF + 1];
 extern adfTYPE df[4];
+
+char minimig_ver_beta;
+char minimig_ver_major;
+char minimig_ver_minor;
+char minimig_ver_minion;
 
 char BootPrint(const char *text);
 
@@ -115,11 +115,13 @@ void ShiftFpga(unsigned char data)
 
 // Xilinx FPGA configuration
 // was before unsigned char ConfigureFpga(void)
-RAMFUNC unsigned char ConfigureFpga(char *name)
+unsigned char ConfigureFpga(const char *name)
 {
     unsigned long  t;
     unsigned long  n;
     unsigned char *ptr;
+    FIL file;
+    UINT br;
 
     // set outputs
     *AT91C_PIOA_SODR = XILINX_CCLK | XILINX_DIN | XILINX_PROG_B;
@@ -155,22 +157,22 @@ RAMFUNC unsigned char ConfigureFpga(char *name)
     }
 
     if(!name)
-    //  name = "CORE    BIN";
-		name = "X7A102T BIN";
+    //  name = "CORE.BIN";
+        name = "X7A102T.BIN";
 
     // open bitstream file
-    if (FileOpen(&file, name) == 0)
+    if (f_open(&file, name, FA_READ) != FR_OK)
     {
         iprintf("No FPGA configuration file found!\r");
         FatalError(4);
     }
 
-    iprintf("FPGA bitstream file opened, file size = %d\r", file.size);
+    iprintf("FPGA bitstream file %s opened, file size = %llu\r", name, f_size(&file));
     iprintf("[");
 
     // send all bytes to FPGA in loop
     t = 0;
-    n = file.size >> 3;
+    n = f_size(&file) >> 3;
     ptr = sector_buffer;
     do
     {
@@ -185,8 +187,10 @@ RAMFUNC unsigned char ConfigureFpga(char *name)
             if ((t & 0x1FF) == 0)
                 iprintf("*");
 
-            if (!FileRead(&file, sector_buffer))
+            if (!f_read(&file, sector_buffer, 512, &br) != FR_OK) {
+                f_close(&file);
                 return(0);
+            }
 
             ptr = sector_buffer;
         }
@@ -203,12 +207,9 @@ RAMFUNC unsigned char ConfigureFpga(char *name)
 
         t++;
 
-        // read next sector if 512 (64*8) bytes done
-        if ((t & 0x3F) == 0)
-            FileNextSector(&file);
-
     }
     while (t < n);
+    f_close(&file);
 
     // return outputs to a state suitable for user_io.c
     *AT91C_PIOA_SODR = XILINX_CCLK | XILINX_DIN | XILINX_PROG_B;
@@ -235,34 +236,37 @@ static inline void ShiftFpga(unsigned char data)
     for ( i = 0; i < 8; i++ )
     {
         /* Dump to DATA0 and insert a positive edge pulse at the same time */
-        *AT91C_PIOA_CODR = ALTERA_DATA0 | ALTERA_DCLK;
-        if((data >> i) & 1) *AT91C_PIOA_SODR = ALTERA_DATA0;
-        *AT91C_PIOA_SODR = ALTERA_DCLK;
+        FPGA_DATA0_CODR = ALTERA_DATA0;
+        FPGA_CODR = ALTERA_DCLK;
+        if(data & 1) FPGA_DATA0_SODR = ALTERA_DATA0;
+        FPGA_SODR = ALTERA_DCLK;
+        data >>= 1;
     }
 }
 
 // Altera FPGA configuration
-RAMFUNC unsigned char ConfigureFpga(char *name)
+unsigned char ConfigureFpga(const char *name)
 {
     unsigned long i;
     unsigned char *ptr;
+    FIL file;
+    UINT br;
 
     // set outputs
-    *AT91C_PIOA_SODR = ALTERA_DCLK | ALTERA_DATA0 | ALTERA_NCONFIG;
-    // enable outputs
-    *AT91C_PIOA_OER = ALTERA_DCLK | ALTERA_DATA0 | ALTERA_NCONFIG;
+    FPGA_SODR = ALTERA_DCLK | ALTERA_NCONFIG;
+    FPGA_DATA0_SODR = ALTERA_DATA0;
 
     if(!name)
-      name = "CORE    RBF";
+      name = "CORE.RBF";
 
     // open bitstream file
-    if (FileOpen(&file, name) == 0)
+    if (f_open(&file, name, FA_READ) != FR_OK)
     {
         iprintf("No FPGA configuration file found!\r");
         FatalError(4);
     }
 
-    iprintf("FPGA bitstream file opened, file size = %d\r", file.size);
+    iprintf("FPGA bitstream file %s opened, file size = %llu\r", name, f_size(&file));
     iprintf("[");
 
     // send all bytes to FPGA in loop
@@ -270,18 +274,19 @@ RAMFUNC unsigned char ConfigureFpga(char *name)
 
     /* Drive a transition of 0 to 1 to NCONFIG to indicate start of configuration */
     for(i=0;i<10;i++)
-      *AT91C_PIOA_CODR = ALTERA_NCONFIG;  // must be low for at least 500ns
+      FPGA_CODR = ALTERA_NCONFIG;  // must be low for at least 500ns
 
-    *AT91C_PIOA_SODR = ALTERA_NCONFIG;
+    FPGA_SODR = ALTERA_NCONFIG;
 
     // now wait for NSTATUS to go high
     // specs: max 800us
     i = 1000000;
-    while (!(*AT91C_PIOA_PDSR & ALTERA_NSTATUS))
+    while (!(FPGA_PDSR & ALTERA_NSTATUS))
     {
         if (--i == 0)
         {
             iprintf("FPGA NSTATUS is NOT high!\r");
+            f_close(&file);
             FatalError(3);
         }
     }
@@ -289,29 +294,31 @@ RAMFUNC unsigned char ConfigureFpga(char *name)
     DISKLED_ON;
 
     int t = 0;
-    int n = file.size >> 3;
+    int n = f_size(&file) >> 3;
 
     /* Loop through every single byte */
-    for ( i = 0; i < file.size; )
+    for ( i = 0; i < f_size(&file); )
     {
-        // read sector if 512 (64*8) bytes done
-        if ((i & 0x1FF) == 0)
+        // read sector if SECTOR_BUFFER_SIZE bytes done
+        if ((i & (SECTOR_BUFFER_SIZE-1)) == 0)
         {
             if (i & (1<<13))
                 DISKLED_OFF
             else
                 DISKLED_ON
 
-            if ((i & 0x3FFF) == 0)
+            if ((i & (SECTOR_BUFFER_SIZE*4-1)) == 0)
                 iprintf("*");
 
-            if (!FileRead(&file, sector_buffer))
+            if (f_read(&file, sector_buffer, SECTOR_BUFFER_SIZE, &br) != FR_OK) {
+                f_close(&file);
                 return(0);
+            }
 
             ptr = sector_buffer;
         }
 
-        int bytes2copy = (i < file.size - 8)?8:file.size-i;
+        int bytes2copy = (i < f_size(&file) - 8)?8:f_size(&file)-i;
         i += bytes2copy;
         while(bytes2copy) {
           ShiftFpga(*ptr++);
@@ -319,24 +326,23 @@ RAMFUNC unsigned char ConfigureFpga(char *name)
         }
 
         /* Check for error through NSTATUS for every 10KB programmed and the last byte */
-        if ( !(i % 10240) || (i == file.size - 1) ) {
-            if ( !*AT91C_PIOA_PDSR & ALTERA_NSTATUS ) {
+        if ( !(i % 10240) || (i == f_size(&file) - 1) ) {
+            if ( !FPGA_PDSR & ALTERA_NSTATUS ) {
                 iprintf("FPGA NSTATUS is NOT high!\r");
+                f_close(&file);
                 FatalError(5);
             }
         }
-
-        // read next sector if 512 (64*8) bytes done
-        if ((i & 0x1FF) == 0)
-            FileNextSector(&file);
     }
+
+    f_close(&file);
 
     iprintf("]\r");
     iprintf("FPGA bitstream loaded\r");
     DISKLED_OFF;
 
     // check if DONE is high
-    if (!(*AT91C_PIOA_PDSR & ALTERA_DONE)) {
+    if (!(FPGA_DONE_PDSR & ALTERA_DONE)) {
       iprintf("FPGA Configuration done but contains error... CONF_DONE is LOW\r");
       FatalError(5);
     }
@@ -354,17 +360,17 @@ RAMFUNC unsigned char ConfigureFpga(char *name)
     
     for ( i = 0; i < 50; i++ )
     {
-        *AT91C_PIOA_CODR = ALTERA_DCLK;
-        *AT91C_PIOA_SODR = ALTERA_DCLK;
+        FPGA_CODR = ALTERA_DCLK;
+        FPGA_SODR = ALTERA_DCLK;
     }
 
     /* Initialization end */
 
-    if ( !(*AT91C_PIOA_PDSR & ALTERA_NSTATUS) || 
-         !(*AT91C_PIOA_PDSR & ALTERA_DONE)) {
-      
+    if ( !(FPGA_PDSR & ALTERA_NSTATUS) || 
+         !(FPGA_DONE_PDSR & ALTERA_DONE)) {
+
       iprintf("FPGA Initialization finish but contains error: NSTATUS is %s and CONF_DONE is %s.\r", 
-             ((*AT91C_PIOA_PDSR & ALTERA_NSTATUS)?"HIGH":"LOW"), ((*AT91C_PIOA_PDSR & ALTERA_DONE)?"HIGH":"LOW") );
+             ((FPGA_PDSR & ALTERA_NSTATUS)?"HIGH":"LOW"), ((FPGA_DONE_PDSR & ALTERA_DONE)?"HIGH":"LOW") );
       FatalError(5);
     }
 
@@ -373,7 +379,7 @@ RAMFUNC unsigned char ConfigureFpga(char *name)
 #endif
 
 
-void SendFile(RAFile *file)
+void SendFile(FIL *file)
 {
     unsigned char  c1, c2;
     unsigned long  j;
@@ -381,11 +387,11 @@ void SendFile(RAFile *file)
     unsigned char *p;
 
     iprintf("[");
-    n = (file->file.size + 511) >> 9; // sector count (rounded up)
+    n = (f_size(file) + 511) >> 9; // sector count (rounded up)
     while (n--)
     {
         // read data sector from memory card
-		RARead(file,sector_buffer,512);
+        FileReadBlock(file,sector_buffer);
 
         do
         {
@@ -423,31 +429,32 @@ void SendFile(RAFile *file)
 }
 
 
-void SendFileEncrypted(RAFile *file,unsigned char *key,int keysize)
+void SendFileEncrypted(FIL *file,unsigned char *key,int keysize)
 {
+    UINT br;
     unsigned char  c1, c2;
-	unsigned char headersize;
-	unsigned int keyidx=0;
+    unsigned char headersize;
+    unsigned int keyidx=0;
     unsigned long  j;
     unsigned long  n;
     unsigned char *p;
-	int badbyte=0;
+    int badbyte=0;
 
     iprintf("[");
-	headersize=file->size&255;	// ROM should be a round number of kilobytes; overspill will likely be the Amiga Forever header.
+    headersize=f_size(file)&255;	// ROM should be a round number of kilobytes; overspill will likely be the Amiga Forever header.
 
-	RARead(file,sector_buffer,headersize);	// Read extra bytes
+    f_read(file,sector_buffer,headersize, &br); // Read extra bytes
 
-    n = (file->size + (511-headersize)) >> 9; // sector count (rounded up)
+    n = (f_size(file) + (511-headersize)) >> 9; // sector count (rounded up)
     while (n--)
     {
-		RARead(file,sector_buffer,512);
+        FileReadBlock(file,sector_buffer);
         for (j = 0; j < 512; j++)
-		{
-			sector_buffer[j]^=key[keyidx++];
-			if(keyidx>=keysize)
-				keyidx-=keysize;
-		}
+        {
+            sector_buffer[j]^=key[keyidx++];
+            if(keyidx>=keysize)
+            keyidx-=keysize;
+        }
 
         do
         {
@@ -483,20 +490,53 @@ void SendFileEncrypted(RAFile *file,unsigned char *key,int keysize)
     iprintf("]\r");
 }
 
+char kick1xfoundstr[] = "Kickstart v1.x found\n";
+const char applymemdetectionpatchstr[] = "Applying Kickstart 1.x memory detection patch\n";
+
+const char *kickfoundstr = NULL, *applypatchstr = NULL;
+
+void PatchKick1xMemoryDetection() {
+  int applypatch = 0;
+
+  if (!strncmp(sector_buffer + 0x18, "exec 33.192 (8 Oct 1986)", 24)) {
+    kick1xfoundstr[13] = '2';
+    kickfoundstr = kick1xfoundstr;
+    goto applypatch;
+  }
+  if (!strncmp(sector_buffer + 0x18, "exec 34.2 (28 Oct 1987)", 23)) {
+    kick1xfoundstr[13] = '3';
+    kickfoundstr = kick1xfoundstr;
+    goto applypatch;
+  }
+
+  goto out;
+
+applypatch:
+  if ((sector_buffer[0x154] == 0x66) && (sector_buffer[0x155] == 0x78)) {
+    applypatchstr = applymemdetectionpatchstr;
+    sector_buffer[0x154] = 0x60;
+  }
+
+out:
+  return;
+}
+
 // SendFileV2 (for minimig_v2)
-void SendFileV2(RAFile* file, unsigned char* key, int keysize, int address, int size)
+void SendFileV2(FIL* file, unsigned char* key, int keysize, int address, int size)
 {
+  UINT br;
   int i,j;
   unsigned int keyidx=0;
+
   iprintf("File size: %dkB\r", size>>1);
   iprintf("[");
   if (keysize) {
     // read header
-    RARead(file, sector_buffer, 0xb);
+    f_read(file, sector_buffer, 0xb, &br);
   }
   for (i=0; i<size; i++) {
     if (!(i&31)) iprintf("*");
-    RARead(file, sector_buffer, 512);
+    FileReadBlock(file, sector_buffer);
     if (keysize) {
       // decrypt ROM
       for (j=0; j<512; j++) {
@@ -504,6 +544,14 @@ void SendFileV2(RAFile* file, unsigned char* key, int keysize, int address, int 
         if(keyidx >= keysize) keyidx -= keysize;
       }
     }
+
+    // patch kickstart 1.x to force memory detection every time the AMIGA is reset
+    if (minimig_cfg.kick1x_memory_detection_patch && (i == 0 || i == 512)) {
+      kickfoundstr = NULL;
+      applypatchstr = NULL;
+      PatchKick1xMemoryDetection();
+    }
+
     EnableOsd();
     unsigned int adr = address + i*512;
     SPI(OSD_CMD_WR);
@@ -525,6 +573,13 @@ void SendFileV2(RAFile* file, unsigned char* key, int keysize, int address, int 
     DisableOsd();
   }
   iprintf("]\r");
+
+  if (kickfoundstr) {
+    iprintf(kickfoundstr);
+  }
+  if (applypatchstr) {
+    iprintf(applypatchstr);
+  }
 }
 
 
@@ -845,7 +900,8 @@ unsigned char GetFPGAStatus(void)
     return status;
 }
 
-void fpga_init(char *name) {
+
+void fpga_init(const char *name) {
   unsigned long time = GetTimer(0);
   int loaded_from_usb = USB_LOAD_VAR;
 
@@ -878,18 +934,22 @@ void fpga_init(char *name) {
   user_io_detect_core_type();
   mist_ini_parse();
   user_io_send_buttons(1);
+  InitDB9();
 
   if((user_io_core_type() == CORE_TYPE_MINIMIG)||
      (user_io_core_type() == CORE_TYPE_MINIMIG2)) {
+
     puts("Running minimig setup");
     
     if(minimig_v2()) {
+      user_io_8bit_set_status(minimig_cfg.clock_freq << 1, 0xffffffff);
+      WaitTimer(100);
       EnableOsd();
       SPI(OSD_CMD_VERSION);
-      char ver_beta   = SPI(0xff);
-      char ver_major  = SPI(0xff);
-      char ver_minor  = SPI(0xff);
-      char ver_minion = SPI(0xff);
+      minimig_ver_beta   = SPI(0xff);
+      minimig_ver_major  = SPI(0xff);
+      minimig_ver_minor  = SPI(0xff);
+      minimig_ver_minion = SPI(0xff);
       DisableOsd();
       SPIN(); SPIN(); SPIN(); SPIN();
       SPI(OSD_CMD_RST);
@@ -907,7 +967,7 @@ void fpga_init(char *name) {
       BootInit();
       WaitTimer(500);
       char rtl_ver[45];
-      siprintf(rtl_ver, "**** MINIMIG-AGA%s v%d.%d.%d for MiST ****", ver_beta ? " BETA" : "", ver_major, ver_minor, ver_minion);
+      siprintf(rtl_ver, "**** MINIMIG-AGA%s v%d.%d.%d for MiST ****", minimig_ver_beta ? " BETA" : "", minimig_ver_major, minimig_ver_minor, minimig_ver_minion);
       BootPrintEx(rtl_ver);
       BootPrintEx(" ");
       BootPrintEx("MINIMIG-AGA for MiST by Rok Krajnc (rok.krajnc@gmail.com)");
@@ -919,25 +979,25 @@ void fpga_init(char *name) {
       WaitTimer(1000);
     }
 
-    ChangeDirectory(DIRECTORY_ROOT);
-    
+    ChangeDirectoryName("/");
+
     //eject all disk
     df[0].status = 0;
     df[1].status = 0;
     df[2].status = 0;
     df[3].status = 0;
 
-    config.kickstart.name[0]=0;
+    config.kickstart[0]=0;
     SetConfigurationFilename(0); // Use default config
-    LoadConfiguration(0);  // Use slot-based config filename
-    
+    LoadConfiguration(0, 1);  // Use slot-based config filename
+
   } // end of minimig setup
-  
-  if(user_io_core_type() == CORE_TYPE_MIST) {
+
+  if((user_io_core_type() == CORE_TYPE_MIST) || (user_io_core_type() == CORE_TYPE_MIST2)) {
     puts("Running mist setup");
-    
+
     tos_upload(NULL);
-    
+
     // end of mist setup
   }
 
