@@ -93,8 +93,8 @@ extern unsigned char fat32;
 // options flags
 #define SCAN_DIR     1 // include subdirectories
 #define SCAN_LFN     2 // include long file names
-#define FIND_DIR     4 // find first directory beginning with given charater
-#define FIND_FILE    8 // find first file entry beginning with given charater
+#define FIND_DIR     4 // find first directory beginning with given character
+#define FIND_FILE    8 // find first file entry beginning with given character
 #define SCAN_SYSDIR 16 // include subdirectories with system attribute
 
 extern FATFS fs;
@@ -119,6 +119,7 @@ char ScanDirectory(unsigned long mode, char *extension, unsigned char options);
 void ChangeDirectoryName(unsigned char *name);
 
 void fat_switch_to_usb(void);
+char *fs_type_to_string(void);
 int8_t fat_medium_present(void);
 int8_t fat_uses_mmc(void);
 

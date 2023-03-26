@@ -72,7 +72,7 @@ typedef struct {
   hid_report_t conf;
 
   uint8_t interval;
-  uint32_t qNextPollTime;     // next poll time
+  uint32_t qLastPollTime;     // last poll time
 
 } usb_hid_iface_info_t;
 
@@ -100,10 +100,12 @@ extern const usb_device_class_config_t usb_hid_class;
 void hid_set_kbd_led(unsigned char led, bool on);
 uint8_t hid_get_joysticks(void);
 int8_t hid_keyboard_present(void);
+unsigned char get_keyboards(void);
+unsigned char get_mice(void);
 
 // HID low-level remapping - do not confuse with virtual joystick in joymapping.h
 void hid_joystick_button_remap_init(void);
-void hid_joystick_button_remap(char *);
+char hid_joystick_button_remap(char *, char, int);
 void joy_key_map_init(void); // older function, prefer to use joymapping.h function
 
 #endif // HID_H

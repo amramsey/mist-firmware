@@ -11,17 +11,17 @@
 typedef struct {
 	char mod;
 	uint64_t conf_default;
-	char rbfname[9];
-	char corename[9];
-	char dirname[9];
-	char vhdname[9];
+	char rbfname[33];
+	char corename[17];
+	char dirname[17];
+	char vhdname[17];
 	char conf[MAX_CONF_SIZE];
 } arc_t;
 
 static arc_t arc;
 static int conf_ptr;
 
-void arc_set_conf(char *);
+char arc_set_conf(char *, char, int);
 
 // arc ini sections
 const ini_section_t arc_ini_sections[] = {
@@ -32,20 +32,22 @@ const ini_section_t arc_ini_sections[] = {
 const ini_var_t arc_ini_vars[] = {
 	{"MOD", (void*)(&arc.mod), UINT8, 0, 127, 1},
 	{"DEFAULT", (void*)(&arc.conf_default), UINT64, 0, ~0, 1},
-	{"RBF", (void*)arc.rbfname, STRING, 1, 8, 1},
-	{"NAME", (void*)arc.corename, STRING, 1, 8, 1},
-	{"DIR", (void*)arc.dirname, STRING, 1, 8, 1},
-	{"VHD", (void*)arc.vhdname, STRING, 1, 8, 1},
+	{"RBF", (void*)arc.rbfname, STRING, 1, 32, 1},
+	{"NAME", (void*)arc.corename, STRING, 1, 16, 1},
+	{"DIR", (void*)arc.dirname, STRING, 1, 16, 1},
+	{"VHD", (void*)arc.vhdname, STRING, 1, 16, 1},
 	{"CONF", (void*)arc_set_conf, CUSTOM_HANDLER, 0, 0, 1},
 };
 
-void arc_set_conf(char *c)
+char arc_set_conf(char *c, char action, int tag)
 {
+	if (action == INI_SAVE) return 0;
 	if ((conf_ptr+strlen(c))<MAX_CONF_SIZE-1) {
 		strcpy(&arc.conf[conf_ptr], c);
 		strcat(arc.conf, ";");
 		conf_ptr += strlen(c) + 1;
 	}
+	return 0;
 }
 
 char arc_open(const char *fname)
@@ -60,7 +62,7 @@ char arc_open(const char *fname)
 
 	arc_reset();
 	arc.mod = -1; // indicate error by default, valid ARC file will overrdide with the correct MOD value
-	ini_parse(&arc_ini_cfg, 0);
+	ini_parse(&arc_ini_cfg, 0, 0);
 	iprintf("ARC CONF STR: %s\n",arc.conf);
 	return arc.mod;
 }

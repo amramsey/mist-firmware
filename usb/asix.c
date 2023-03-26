@@ -27,6 +27,15 @@ static uint16_t tx_cnt, tx_offset;
 
 bool eth_present = 0;
 
+usb_asix_info_t *eth_info;
+
+uint8_t *get_mac(void) {
+  if (eth_present) {
+    return eth_info->mac;
+  }
+  return NULL;
+}
+
 // currently only AX88772 is supported as that's the only
 // device i have
 #define ASIX_TYPE_AX88772 0x01
@@ -305,6 +314,7 @@ static uint8_t asix_parse_conf(usb_device_t *dev, uint8_t conf, uint16_t len) {
 	
 	// Fill in the endpoint info structure
 	info->ep[epidx].epAddr	 = (p->ep_desc.bEndpointAddress & 0x0F);
+	info->ep[epidx].epType = p->ep_desc.bmAttributes & EP_TYPE_MSK;
 	info->ep[epidx].maxPktSize = p->ep_desc.wMaxPacketSize[0];
 	info->ep[epidx].epAttribs	 = 0;
 	info->ep[epidx].bmNakPower = USB_NAK_NOWAIT;
@@ -319,13 +329,13 @@ static uint8_t asix_parse_conf(usb_device_t *dev, uint8_t conf, uint16_t len) {
   
   if(len != 0) {
     asix_debugf("Config underrun: %d", len);
-    return USB_ERROR_CONFIGURAION_SIZE_MISMATCH;
+    return USB_ERROR_CONFIGURATION_SIZE_MISMATCH;
   }
 
   return 0;
 }
 
-static uint8_t usb_asix_init(usb_device_t *dev) {
+static uint8_t usb_asix_init(usb_device_t *dev, usb_device_descriptor_t *dev_desc) {
   usb_asix_info_t *info = &(dev->asix_info);
   uint8_t i, rcode = 0;
 
@@ -333,13 +343,30 @@ static uint8_t usb_asix_init(usb_device_t *dev) {
   if(eth_present)
     return USB_DEV_CONFIG_ERROR_DEVICE_NOT_SUPPORTED;
 
+  // If device class is not vendor specific return
+  if (dev_desc->bDeviceClass != USB_CLASS_VENDOR_SPECIFIC)
+    return USB_DEV_CONFIG_ERROR_DEVICE_NOT_SUPPORTED;
+
+  asix_debugf("vid/pid = %x/%x", dev_desc->idVendor, dev_desc->idProduct);
+
+  // search for vid/pid in supported device list
+  for(i=0;asix_devs[i].type &&
+    ((asix_devs[i].vid != dev_desc->idVendor) ||
+    (asix_devs[i].pid != dev_desc->idProduct));i++);
+
+  if(!asix_devs[i].type) {
+    asix_debugf("Not a supported ASIX device");
+    return USB_DEV_CONFIG_ERROR_DEVICE_NOT_SUPPORTED;
+  }
+
   // reset status
-  info->qNextIrqPollTime = info->qNextBulkPollTime = info->qNextMACSendTime = 0;
+  info->qLastIrqPollTime = info->qLastBulkPollTime = info->qLastMACSendTime = 0;
   info->bPollEnable = false;
   info->linkDetected = false;
 
   for(i=0;i<3;i++) {
     info->ep[i].epAddr	   = 1;
+    info->ep[i].epType	   = 0;
     info->ep[i].maxPktSize = 8;
     info->ep[i].epAttribs  = 0;
     info->ep[i].bmNakPower = USB_NAK_NOWAIT;
@@ -352,28 +379,13 @@ static uint8_t usb_asix_init(usb_device_t *dev) {
     usb_configuration_descriptor_t conf_desc;
   } buf;
 
-  // read full device descriptor 
+  // read full device descriptor
   rcode = usb_get_dev_descr( dev, sizeof(usb_device_descriptor_t), &buf.dev_desc );
   if( rcode ) {
     asix_debugf("failed to get device descriptor");
     return rcode;
   }
 
-  // If device class is not vendor specific return
-  if (buf.dev_desc.bDeviceClass != USB_CLASS_VENDOR_SPECIFIC)
-    return USB_DEV_CONFIG_ERROR_DEVICE_NOT_SUPPORTED;
- 
-  asix_debugf("vid/pid = %x/%x", buf.dev_desc.idVendor, buf.dev_desc.idProduct);
-
-  // search for vid/pid in supported device list
-  for(i=0;asix_devs[i].type && 
-	((asix_devs[i].vid != buf.dev_desc.idVendor) || 
-	 (asix_devs[i].pid != buf.dev_desc.idProduct));i++);
-
-  if(!asix_devs[i].type) {
-    asix_debugf("Not a supported ASIX device");
-    return USB_DEV_CONFIG_ERROR_DEVICE_NOT_SUPPORTED;
-  }
     
   // Set Configuration Value
   //  iprintf("conf value = %d\n", buf.conf_desc.bConfigurationValue);
@@ -502,6 +514,7 @@ static uint8_t usb_asix_init(usb_device_t *dev) {
   // finally inform core about ethernet support
   tos_update_sysctrl(tos_system_ctrl() | TOS_CONTROL_ETHERNET);
 
+  eth_info = info;
   eth_present = 1;
 
   return 0;
@@ -535,18 +548,18 @@ static uint8_t usb_asix_poll(usb_device_t *dev) {
     return 0;
 
   // poll for MAC address and send it to the FPGA in every 2 secs
-  if (info->qNextMACSendTime <= timer_get_msec()) {
+  if (timer_check(info->qLastMACSendTime, 2000)) {
     if ((rcode = asix_read_cmd(dev, AX_CMD_READ_NODE_ID,
        0, 0, ETH_ALEN, info->mac)) != 0) {
       return rcode;
     }
 
     user_io_eth_send_mac(info->mac);
-    info->qNextMACSendTime = timer_get_msec() + 2000;
+    info->qLastMACSendTime = timer_get_msec();
   }
 
   // poll interrupt endpoint
-  if (info->qNextIrqPollTime <= timer_get_msec()) {
+  if (timer_check(info->qLastIrqPollTime, info->int_poll_ms)) {
     uint16_t read = info->ep[info->ep_int_idx].maxPktSize;
     uint8_t buf[info->ep[info->ep_int_idx].maxPktSize];
     uint8_t rcode = usb_in_transfer(dev, &(info->ep[info->ep_int_idx]), &read, buf);
@@ -570,11 +583,11 @@ static uint8_t usb_asix_poll(usb_device_t *dev) {
 	info->linkDetected = link_detected;
       }
     }
-    info->qNextIrqPollTime = timer_get_msec() + info->int_poll_ms;
+    info->qLastIrqPollTime = timer_get_msec();
   }
 
-  // Do RX/TX handling at 100Hz
-  if (info->qNextBulkPollTime <= timer_get_msec()) {
+  // bulk ep polling at fixed 500Hz
+  if (timer_check(info->qLastBulkPollTime, 2)) {
     uint8_t rcode;
     static uint32_t old_status = 0;
     uint32_t status = user_io_eth_get_status();
@@ -708,8 +721,7 @@ static uint8_t usb_asix_poll(usb_device_t *dev) {
       }
     }    
 
-    // bulk ep polling at fixed 500Hz
-    info->qNextBulkPollTime = timer_get_msec() + 2;
+    info->qLastBulkPollTime = timer_get_msec();
   }
 
   return rcode;

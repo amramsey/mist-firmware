@@ -22,8 +22,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // 2009-12-10   - changed command header id
 // 2010-04-14   - changed command header id
 
-#include "stdio.h"
-#include "string.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
 #include "errors.h"
 #include "hardware.h"
 #include "fdd.h"
@@ -34,6 +35,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "fpga.h"
 #include "tos.h"
 #include "mist_cfg.h"
+#include "settings.h"
+#include "usb/joymapping.h"
 
 uint8_t rstval = 0;
 
@@ -187,7 +190,7 @@ unsigned char ConfigureFpga(const char *name)
             if ((t & 0x1FF) == 0)
                 iprintf("*");
 
-            if (!f_read(&file, sector_buffer, 512, &br) != FR_OK) {
+            if (f_read(&file, sector_buffer, 512, &br) != FR_OK) {
                 f_close(&file);
                 return(0);
             }
@@ -236,10 +239,10 @@ static inline void ShiftFpga(unsigned char data)
     for ( i = 0; i < 8; i++ )
     {
         /* Dump to DATA0 and insert a positive edge pulse at the same time */
-        FPGA_DATA0_CODR = ALTERA_DATA0;
-        FPGA_CODR = ALTERA_DCLK;
-        if(data & 1) FPGA_DATA0_SODR = ALTERA_DATA0;
-        FPGA_SODR = ALTERA_DCLK;
+        ALTERA_DATA0_RESET;
+        ALTERA_DCLK_RESET;
+        if(data & 1) ALTERA_DATA0_SET;
+        ALTERA_DCLK_SET;
         data >>= 1;
     }
 }
@@ -253,8 +256,9 @@ unsigned char ConfigureFpga(const char *name)
     UINT br;
 
     // set outputs
-    FPGA_SODR = ALTERA_DCLK | ALTERA_NCONFIG;
-    FPGA_DATA0_SODR = ALTERA_DATA0;
+    ALTERA_DCLK_SET;
+    ALTERA_NCONFIG_SET;
+    ALTERA_DATA0_SET;
 
     if(!name)
       name = "CORE.RBF";
@@ -274,14 +278,14 @@ unsigned char ConfigureFpga(const char *name)
 
     /* Drive a transition of 0 to 1 to NCONFIG to indicate start of configuration */
     for(i=0;i<10;i++)
-      FPGA_CODR = ALTERA_NCONFIG;  // must be low for at least 500ns
+      ALTERA_NCONFIG_RESET;  // must be low for at least 500ns
 
-    FPGA_SODR = ALTERA_NCONFIG;
+    ALTERA_NCONFIG_SET;
 
     // now wait for NSTATUS to go high
     // specs: max 800us
     i = 1000000;
-    while (!(FPGA_PDSR & ALTERA_NSTATUS))
+    while (!ALTERA_NSTATUS_STATE)
     {
         if (--i == 0)
         {
@@ -327,7 +331,7 @@ unsigned char ConfigureFpga(const char *name)
 
         /* Check for error through NSTATUS for every 10KB programmed and the last byte */
         if ( !(i % 10240) || (i == f_size(&file) - 1) ) {
-            if ( !FPGA_PDSR & ALTERA_NSTATUS ) {
+            if ( !ALTERA_NSTATUS_STATE ) {
                 iprintf("FPGA NSTATUS is NOT high!\r");
                 f_close(&file);
                 FatalError(5);
@@ -342,7 +346,7 @@ unsigned char ConfigureFpga(const char *name)
     DISKLED_OFF;
 
     // check if DONE is high
-    if (!(FPGA_DONE_PDSR & ALTERA_DONE)) {
+    if (!ALTERA_DONE_STATE) {
       iprintf("FPGA Configuration done but contains error... CONF_DONE is LOW\r");
       FatalError(5);
     }
@@ -360,17 +364,16 @@ unsigned char ConfigureFpga(const char *name)
     
     for ( i = 0; i < 50; i++ )
     {
-        FPGA_CODR = ALTERA_DCLK;
-        FPGA_SODR = ALTERA_DCLK;
+        ALTERA_DCLK_RESET;
+        ALTERA_DCLK_SET;
     }
 
     /* Initialization end */
 
-    if ( !(FPGA_PDSR & ALTERA_NSTATUS) || 
-         !(FPGA_DONE_PDSR & ALTERA_DONE)) {
+    if ( !ALTERA_NSTATUS_STATE || !ALTERA_DONE_STATE ) {
 
       iprintf("FPGA Initialization finish but contains error: NSTATUS is %s and CONF_DONE is %s.\r", 
-             ((FPGA_PDSR & ALTERA_NSTATUS)?"HIGH":"LOW"), ((FPGA_DONE_PDSR & ALTERA_DONE)?"HIGH":"LOW") );
+             ALTERA_NSTATUS_STATE?"HIGH":"LOW", ALTERA_DONE_STATE?"HIGH":"LOW" );
       FatalError(5);
     }
 
@@ -902,38 +905,44 @@ unsigned char GetFPGAStatus(void)
 
 
 void fpga_init(const char *name) {
-  unsigned long time = GetTimer(0);
+  unsigned long time = GetRTTC();
   int loaded_from_usb = USB_LOAD_VAR;
+  unsigned char ct;
+
+  // load the global MISTCFG.INI here
+  // loading between the FPGA init and detect_core_type breaks with some SD-Cards. Reason unknown.
+  virtual_joystick_remap_init(false);
+  settings_load(true);
 
   iprintf("loaded_from_usb = %d\n", USB_LOAD_VAR == USB_LOAD_VALUE);
   USB_LOAD_VAR = 0;
 
   if((loaded_from_usb != USB_LOAD_VALUE) && !user_io_dip_switch1()) {
-    unsigned char ct;
 
     if (ConfigureFpga(name)) {
-      time = GetTimer(0) - time;
-      iprintf("FPGA configured in %lu ms\r", time >> 20);
+      time = GetRTTC() - time;
+      iprintf("FPGA configured in %lu ms\r", time);
     } else {
       iprintf("FPGA configuration failed\r");
       FatalError(8); // 3
     }
-
-    // wait max 100 msec for a valid core type
-    time = GetTimer(100);
-    do {
-      EnableIO();
-      ct = SPI(0xff);
-      DisableIO();
-      SPI(0xff);         // for old minimig core
-    } while( ((ct == 0) || (ct == 0xff)) && !CheckTimer(time));
-
-    iprintf("ident = %x\n", ct);
   }
 
+  // wait max 100 msec for a valid core type
+  time = GetTimer(100);
+  do {
+    EnableIO();
+    ct = SPI(0xff);
+    DisableIO();
+    SPI(0xff);         // for old minimig core
+  } while( ((ct == 0) || (ct == 0xff)) && !CheckTimer(time));
+
+  iprintf("ident = %x\n", ct);
+
   user_io_detect_core_type();
+  user_io_init_core();
   mist_ini_parse();
-  user_io_send_buttons(1);
+  user_io_send_buttons(true);
   InitDB9();
 
   if((user_io_core_type() == CORE_TYPE_MINIMIG)||

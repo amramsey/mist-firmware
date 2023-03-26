@@ -15,24 +15,9 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef USBDEV_H
-#define USBDEV_H
+#ifndef MENU_8BIT_H
+#define MENU_8BIT_H
 
-#include <inttypes.h>
-#include "at91sam_usb.h"
+void Setup8bitMenu();
 
-#define BULK_IN_SIZE  AT91C_EP_IN_SIZE
-#define BULK_OUT_SIZE AT91C_EP_OUT_SIZE
-
-void usb_dev_open(void);
-void usb_dev_reconnect(void);
-
-uint8_t  usb_cdc_is_configured(void);
-uint16_t usb_cdc_write(const char *pData, uint16_t length);
-uint16_t usb_cdc_read(char *pData, uint16_t length);
-
-uint8_t  usb_storage_is_configured(void);
-uint16_t usb_storage_write(const char *pData, uint16_t length);
-uint16_t usb_storage_read(char *pData, uint16_t length);
-
-#endif // USBDEV_H
+#endif

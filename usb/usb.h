@@ -12,9 +12,16 @@
 #define USB_NAK_NOWAIT	  1	//Single NAK stops transfer
 #define USB_NAK_NONAK	  0	//Do not count NAKs, stop retrying after USB Timeout
 
+#define EP_TYPE_CTRL                           0U
+#define EP_TYPE_ISOC                           1U
+#define EP_TYPE_BULK                           2U
+#define EP_TYPE_INTR                           3U
+#define EP_TYPE_MSK                            3U
+
 typedef struct {
   uint8_t epAddr;	// Endpoint address 
   uint8_t maxPktSize;	// Maximum packet size
+  uint8_t epType;
   
   union {
     uint8_t epAttribs;
@@ -81,16 +88,17 @@ typedef struct {
 } __attribute__((packed)) setup_pkt_t;
 
 // Additional Error Codes
-#define USB_ERROR_INVALID_MAX_PKT_SIZE			    0xDA
+#define USB_ERROR_INVALID_MAX_PKT_SIZE                      0xDA
 #define USB_DEV_CONFIG_ERROR_DEVICE_NOT_SUPPORTED           0xDB
-#define USB_ERROR_CONFIGURAION_SIZE_MISMATCH                0xDC
+#define USB_ERROR_CONFIGURATION_SIZE_MISMATCH               0xDC
 #define USB_ERROR_NO_SUCH_DEVICE                            0xDE
-#define USB_ERROR_TRANSFER_TIMEOUT			    0xFF
+#define USB_ERROR_TRANSFER_TIMEOUT                          0xFF
 
 struct usb_device_entry;
+struct usb_device_descriptor;
 
 typedef struct {
-  uint8_t (*init)(struct usb_device_entry *);
+  uint8_t (*init)(struct usb_device_entry *, struct usb_device_descriptor *);
   uint8_t (*release)(struct usb_device_entry *);
   uint8_t (*poll)(struct usb_device_entry *);
 } usb_device_class_config_t;
@@ -108,7 +116,7 @@ typedef struct {
 
 // entry used for list of connected devices
 typedef struct usb_device_entry {
-  const usb_device_class_config_t *class;  // pointer to class hadlers
+  const usb_device_class_config_t *class;  // pointer to class handlers
   ep_t ep0;                            // information about endpoint 0
   uint8_t bAddress;	                   // device address
   uint8_t parent;                          // parent device address
@@ -157,7 +165,7 @@ typedef struct usb_device_entry {
 /*******************************************************************************/
 
 /* Device descriptor structure */
-typedef struct {
+typedef struct usb_device_descriptor {
   uint8_t  bLength;            // Length of this descriptor.
   uint8_t  bDescriptorType;    // DEVICE descriptor type (USB_DESCRIPTOR_DEVICE).
   uint16_t bcdUSB;	       // USB Spec Release Number (BCD).
@@ -173,6 +181,19 @@ typedef struct {
   uint8_t  iSerialNumber;      // Index of String Descriptor with the device's serial number.
   uint8_t  bNumConfigurations; // Number of possible configurations.
 } __attribute__((packed)) usb_device_descriptor_t;
+
+/* Device qualifier descriptor structure */
+typedef struct usb_device_qualifier_descriptor {
+  uint8_t  bLength;
+  uint8_t  bDescriptorType;    // DEVICE descriptor type (USB_DESCRIPTOR_DEVICE_QUALIFIER).
+  uint16_t bcdUSB;             // USB Spec Release Number (BCD).
+  uint8_t  bDeviceClass;       // Class code (assigned by the USB-IF). 0xFF-Vendor specific.
+  uint8_t  bDeviceSubClass;    // Subclass code (assigned by the USB-IF).
+  uint8_t  bDeviceProtocol;    // Protocol code (assigned by the USB-IF). 0xFF-Vendor specific.
+  uint8_t  bMaxPacketSize0;    // Maximum packet size for endpoint 0.
+  uint8_t  bNumConfigurations; // Number of possible configurations.
+  uint8_t  bReserved;
+} __attribute__((packed)) usb_device_qualifier_descriptor_t;
 
 /* Configuration descriptor structure */
 typedef struct {
@@ -262,27 +283,33 @@ typedef struct {
 #define USB_DESCRIPTOR_INTERFACE_POWER  0x08    // bDescriptorType for Interface Power.
 
 void usb_init();
-void usb_poll();
-void usb_SetHubPreMask(void);
-void usb_ResetHubPreMask(void);
 
 uint8_t usb_set_addr( usb_device_t *, uint8_t );
-uint8_t usb_ctrl_req( usb_device_t *, uint8_t bmReqType, 
-		      uint8_t bRequest, uint8_t wValLo, uint8_t wValHi, 
-		      uint16_t wInd, uint16_t nbytes, uint8_t* dataptr);
 uint8_t usb_get_dev_descr( usb_device_t *, uint16_t nbytes, usb_device_descriptor_t* dataptr );
+uint8_t usb_get_dev_qualifier_descr( usb_device_t *, uint16_t nbytes, usb_device_qualifier_descriptor_t* dataptr );
 uint8_t usb_get_conf_descr( usb_device_t *, uint16_t nbytes, uint8_t conf, usb_configuration_descriptor_t* dataptr );
+uint8_t usb_get_other_speed_descr( usb_device_t *, uint16_t nbytes, uint8_t conf, usb_configuration_descriptor_t* dataptr );
 uint8_t usb_get_string_descr( usb_device_t *dev, uint16_t nbytes, uint8_t index, uint16_t lang_id, usb_string_descriptor_t* dataptr );
 uint8_t usb_get_conf( usb_device_t *dev, uint8_t *conf_value );
 uint8_t usb_set_conf( usb_device_t *dev, uint8_t conf_value );
-uint8_t usb_in_transfer( usb_device_t *, ep_t *ep, uint16_t *nbytesptr, uint8_t* data);
-uint8_t usb_out_transfer( usb_device_t *, ep_t *ep, uint16_t nbytes, uint8_t* data );
 uint8_t usb_release_device(uint8_t parent, uint8_t port);
 usb_device_t *usb_get_devices();
 uint8_t usb_configure(uint8_t parent, uint8_t port, bool lowspeed);
 
+// device-specific functions
+uint8_t usb_in_transfer( usb_device_t *, ep_t *ep, uint16_t *nbytesptr, uint8_t* data);
+uint8_t usb_out_transfer( usb_device_t *, ep_t *ep, uint16_t nbytes, const uint8_t* data );
+uint8_t usb_ctrl_req( usb_device_t *, uint8_t bmReqType,
+                      uint8_t bRequest, uint8_t wValLo, uint8_t wValHi,
+                      uint16_t wInd, uint16_t nbytes, uint8_t* dataptr);
+void usb_hw_init();
+void usb_poll();
+void usb_SetHubPreMask(void);
+void usb_ResetHubPreMask(void);
+
 // debug functions
 void usb_dump_device_descriptor(usb_device_descriptor_t *desc);
+void usb_dump_device_qualifier_descriptor(usb_device_qualifier_descriptor_t *desc);
 void usb_dump_conf_descriptor(usb_configuration_descriptor_t *desc);
 void usb_dump_interface_descriptor(usb_interface_descriptor_t *desc);
 void usb_dump_endpoint_descriptor(usb_endpoint_descriptor_t *desc);

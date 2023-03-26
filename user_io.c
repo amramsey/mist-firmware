@@ -10,6 +10,7 @@
 #include "data_io.h"
 #include "archie.h"
 #include "pcecd.h"
+#include "hdd.h"
 #include "cdc_control.h"
 #include "usb.h"
 #include "debug.h"
@@ -24,8 +25,11 @@
 #include "arc_file.h"
 #include "cue_parser.h"
 #include "utils.h"
+#include "settings.h"
 #include "usb/joymapping.h"
 #include "usb/joystick.h"
+#include "FatFs/diskio.h"
+#include "menu.h"
 
 // up to 16 key can be remapped
 #define MAX_REMAP  16
@@ -34,7 +38,6 @@ unsigned char key_remap_table[MAX_REMAP][2];
 #define BREAK  0x8000
 
 static char umounted; // 1st image is file or direct SD?
-static char cue_valid = 0;
 static char buffer[512];
 static uint8_t buffer_drive_index = 0;
 static uint32_t buffer_lba = 0xffffffff;
@@ -105,6 +108,15 @@ static unsigned char ps2_mouse_samplerate;
 // may be in use by an active OSD
 static char osd_is_visible = false;
 
+static char autofire;
+static unsigned long autofire_timer;
+static uint32_t autofire_map;
+static uint32_t autofire_mask;
+static char autofire_joy;
+
+// ATA drives
+static hardfileTYPE  hardfiles[4];
+
 char user_io_osd_is_visible() {
 	return osd_is_visible;
 }
@@ -113,11 +125,15 @@ void user_io_reset() {
 	// no sd card image selected, SD card accesses will go directly
 	// to the card (first slot, and only until the first unmount)
 	umounted = 0;
-	cue_valid = 0;
+	toc.valid = 0;
 	sd_image[0].valid = 0;
 	sd_image[1].valid = 0;
 	sd_image[2].valid = 0;
 	sd_image[3].valid = 0;
+	for (int i=0; i<HARDFILES; i++) {
+		hardfiles[i].enabled = HDF_DISABLED;
+		hardfiles[i].present = 0;
+	}
 	core_mod = 0;
 	core_features = 0;
 	ps2_kbd_state = PS2_KBD_IDLE;
@@ -127,6 +143,8 @@ void user_io_reset() {
 	ps2_mouse_resolution = 0;
 	ps2_mouse_samplerate = 0;
 	ps2_typematic_rate = 0x80;
+	autofire = 0;
+	autofire_joy = -1;
 }
 
 void user_io_init() {
@@ -138,8 +156,6 @@ void user_io_init() {
 
 	// mark remap table as unused
 	memset(key_remap_table, 0, sizeof(key_remap_table));
-
-	InitADC();
 
 	if(MenuButton()) DEBUG_MODE_VAR = DEBUG_MODE ? 0 : DEBUG_MODE_VALUE;
 	iprintf("debug_mode = %d\n", DEBUG_MODE);
@@ -257,21 +273,7 @@ void user_io_detect_core_type() {
 #endif
 	core_type &= 0xef;
 
-	if((core_type != CORE_TYPE_DUMB) &&
-	   (core_type != CORE_TYPE_MINIMIG) &&
-	   (core_type != CORE_TYPE_MINIMIG2) &&
-	   (core_type != CORE_TYPE_PACE) &&
-	   (core_type != CORE_TYPE_MIST) &&
-	   (core_type != CORE_TYPE_MIST2) &&
-	   (core_type != CORE_TYPE_ARCHIE) &&
-	   (core_type != CORE_TYPE_8BIT))
-	    core_type = CORE_TYPE_UNKNOWN;
-
 	switch(core_type) {
-	case CORE_TYPE_UNKNOWN:
-		iprintf("Unable to identify core (%x)!\n", core_type);
-		break;
-
 	case CORE_TYPE_DUMB:
 		puts("Identified core without user interface");
 		break;
@@ -302,7 +304,7 @@ void user_io_detect_core_type() {
 		archie_init();
 		break;
 
-	case CORE_TYPE_8BIT: {
+	case CORE_TYPE_8BIT:
 		puts("Identified 8BIT core");
 
 		// send core variant first to allow the FPGA choosing the config string
@@ -320,6 +322,16 @@ void user_io_detect_core_type() {
 
 		// get requested features
 		user_io_read_core_features();
+		break;
+
+	default:
+		iprintf("Unable to identify core (%x)!\n", core_type);
+		core_type = CORE_TYPE_UNKNOWN;
+	}
+}
+
+void user_io_init_core() {
+	if(core_type == CORE_TYPE_8BIT) {
 
 		// send a reset
 		user_io_8bit_set_status(UIO_STATUS_RESET, ~0);
@@ -337,6 +349,8 @@ void user_io_detect_core_type() {
 					((unsigned long long*)sector_buffer)[0] = 0;
 					f_read(&file, sector_buffer, f_size(&file), &br);
 					user_io_8bit_set_status(((unsigned long long*)sector_buffer)[0], ~1);
+				} else {
+					settings_load(false);
 				}
 				f_close(&file);
 			} else {
@@ -344,14 +358,23 @@ void user_io_detect_core_type() {
 			}
 		}
 
-		for (char root = 0; root <= 1; root++) {
-			// check if there's a <core>.rom present, send it via index 0
-			if (!user_io_create_config_name(s, "ROM", root)) {
-				iprintf("Looking for %s\n", s);
-				if (f_open(&file, s, FA_READ) == FR_OK) {
-					data_io_file_tx(&file, 0, "ROM");
-					f_close(&file);
-					break;
+		// check if there's a <core>.rom or <core>.r0[1-6] present, send it via index 0-6
+		for (int i = 0; i < 7; i++) {
+			char ext[4];
+			if (!i) {
+				strcpy(ext, "ROM");
+			} else {
+				strcpy(ext, "R01");
+				ext[2] = '0'+i;
+			}
+			for (char root = 0; root <= 1; root++) {
+				if (!user_io_create_config_name(s, ext, root)) {
+					iprintf("Looking for %s\n", s);
+					if (f_open(&file, s, FA_READ) == FR_OK) {
+						data_io_file_tx(&file, i, ext);
+						f_close(&file);
+						break;
+					}
 				}
 			}
 		}
@@ -364,31 +387,47 @@ void user_io_detect_core_type() {
 				f_close(&file);
 			}
 		}
-
+		for (int i = 0; i < SD_IMAGES; i++) {
+			hardfile[i] = &hardfiles[i];
+			if ((core_features & (FEAT_IDE0 << (2*i))) == (FEAT_IDE0_CDROM << (2*i))) {
+				iprintf("IDE %d: ATAPI CDROM\n", i);
+				hardfiles[i].enabled = HDF_CDROM;
+				OpenHardfile(i, false);
+			}
+		}
 
 		// check if there's a <core>.vhd present
 		if(!user_io_create_config_name(s, "VHD", CONFIG_ROOT | CONFIG_VHD)) {
 			iprintf("Looking for %s\n", s);
-			user_io_file_mount(s, 0);
+			if (!(core_features & FEAT_IDE0))
+				 user_io_file_mount(s, 0);
+
 			if (!user_io_is_mounted(0)) {
 				// check for <core>.HD0/1 files
 				if(!user_io_create_config_name(s, "HD0", CONFIG_ROOT | CONFIG_VHD)) {
 					for (int i = 0; i < SD_IMAGES; i++) {
 						s[strlen(s)-1] = '0'+i;
 						iprintf("Looking for %s\n", s);
-						user_io_file_mount(s, i);
+						if ((core_features & (FEAT_IDE0 << (2*i))) == (FEAT_IDE0_ATA << (2*i))) {
+							iprintf("IDE %d: ATA Hard Disk\n", i);
+							hardfiles[i].enabled = HDF_FILE;
+							strncpy(hardfiles[i].name, s, sizeof(hardfiles[0].name));
+							hardfiles[i].name[sizeof(hardfiles[0].name)-1] = 0;
+							OpenHardfile(i, false);
+						} else {
+							user_io_file_mount(s, i);
+						}
 					}
 				}
 			}
 		}
+		if (core_features & FEAT_IDE_MASK)
+			SendHDFCfg();
 
 		// release reset
 		user_io_8bit_set_status(0, UIO_STATUS_RESET);
-
-	} break;
 	}
 }
-
 
 static unsigned short usb2amiga( unsigned  char k ) {
 	//  replace MENU key by RGUI to allow using Right Amiga on reduced keyboards
@@ -409,6 +448,8 @@ static unsigned short usb2ps2code( unsigned char k) {
 }
 
 void user_io_analog_joystick(unsigned char joystick, char valueX, char valueY, char valueX2, char valueY2) {
+	if(osd_is_visible) return;
+
 	if(core_type == CORE_TYPE_8BIT || core_type == CORE_TYPE_MINIMIG2) {
 		int16_t valueXX = valueX*mist_cfg.joystick_analog_mult/128 + mist_cfg.joystick_analog_offset;
 		int16_t valueYY = valueY*mist_cfg.joystick_analog_mult/128 + mist_cfg.joystick_analog_offset;
@@ -450,8 +491,19 @@ void user_io_digital_joystick(unsigned char joystick, unsigned char map) {
 void user_io_digital_joystick_ext(unsigned char joystick, uint32_t map) {
 	// "only" 6 joysticks are supported
 	if(joystick > 5) return;
+	if(osd_is_visible) return;
 	//iprintf("ext j%d: %x\n", joystick, map);
 	spi_uio_cmd32(UIO_JOYSTICK0_EXT + joystick, 0x000fffff & map);
+	if (autofire && (map & 0x30)) {
+		autofire_mask = map & 0x30;
+		autofire_map = (autofire_map & autofire_mask) | (map & ~autofire_mask);
+		if (autofire_joy != joystick) {
+			autofire_joy = joystick;
+			autofire_timer = GetTimer(autofire*50);
+		}
+	} else {
+		autofire_joy = -1;
+	}
 }
 
 static char dig2ana(char min, char max) {
@@ -519,10 +571,29 @@ void user_io_sd_set_config(void) {
 	unsigned char data[33];
 
 	// get CSD and CID from SD card
-	MMC_GetCID(data);
-	MMC_GetCSD(data+16);
-	// byte 32 is a generic config byte
-	data[32] = MMC_IsSDHC()?1:0;
+	if (fat_uses_mmc()) {
+		MMC_GetCID(data);
+		MMC_GetCSD(data+16);
+		// byte 32 is a generic config byte
+		data[32] = MMC_IsSDHC()?1:0;
+	} else {
+		// synthetic CSD for non-MMC storage
+		uint32_t capacity;
+		disk_ioctl(fs.pdrv, GET_SECTOR_COUNT, &capacity);
+		memset(data, sizeof(data), 0);
+		data[16+0] = 0x40;
+		data[16+1] = 0x0e;
+		data[16+3] = 0x32;
+		data[16+4] = 0x5b;
+		data[16+5] = 0x59;
+		data[16+6] = 0x90;
+		data[16+7] = (capacity >> 26) & 0xff;
+		data[16+8] = (capacity >> 18) & 0xff;
+		data[16+9] = (capacity >> 10) & 0xff;
+		data[16+10] = 0x5f;
+		data[16+11] = 0xc0;
+		data[32] = 1; // SDHC
+	}
 
 	// and forward it to the FPGA
 	spi_uio_cmd_cont(UIO_SET_SDCONF);
@@ -530,6 +601,12 @@ void user_io_sd_set_config(void) {
 	DisableIO();
 
 	//  hexdump(data, sizeof(data), 0);
+}
+
+static void user_io_sd_ack(char drive_index) {
+	spi_uio_cmd_cont(UIO_SD_ACK);
+	spi8(drive_index);
+	DisableIO();
 }
 
 // read 8+32 bit sd card status word from FPGA
@@ -656,7 +733,7 @@ static void kbd_fifo_enqueue(unsigned short code) {
 
 // send pending bytes if timer has run up
 static void kbd_fifo_poll() {
-	// timer enabled and runnig?
+	// timer enabled and running?
 	if(kbd_timer && !CheckTimer(kbd_timer))
 		return;
 
@@ -671,23 +748,22 @@ static void kbd_fifo_poll() {
 
 
 char user_io_is_cue_mounted() {
-	return cue_valid;
+	return toc.valid;
 }
 
-char user_io_cue_mount(const unsigned char *name) {
+char user_io_cue_mount(const unsigned char *name, unsigned char index) {
 	char res = CUE_RES_OK;
-	cue_valid = 0;
+	toc.valid = 0;
 	if (name) {
-		res = cue_parse(name, &sd_image[3]);
-		if (res == CUE_RES_OK) cue_valid = 1;
+		res = cue_parse(name, &sd_image[index]);
 	}
 
 	// send mounted image size first then notify about mounting
 	EnableIO();
 	SPI(UIO_SET_SDINFO);
 	// use LE version, so following BYTE(s) may be used for size extension in the future.
-	spi32le(cue_valid ? f_size(&toc.file->file) : 0);
-	spi32le(cue_valid ? f_size(&toc.file->file) >> 32 : 0);
+	spi32le(toc.valid ? f_size(&toc.file->file) : 0);
+	spi32le(toc.valid ? f_size(&toc.file->file) >> 32 : 0);
 	spi32le(0); // reserved for future expansion
 	spi32le(0); // reserved for future expansion
 	DisableIO();
@@ -1196,6 +1272,13 @@ void user_io_poll() {
 		virtual_joystick_keyboard(joy_map);
 	}
 
+	if (autofire && autofire_joy >= 0 && autofire_joy <= 5 && CheckTimer(autofire_timer)) {
+		autofire_map ^= autofire_mask;
+		//iprintf("06x\n", autofire_map);
+		spi_uio_cmd32(UIO_JOYSTICK0_EXT + autofire_joy, 0x000fffff & autofire_map);
+		autofire_timer = GetTimer(autofire*50);
+	}
+
 	user_io_send_buttons(0);
 
 	// mouse movement emulation is continous 
@@ -1395,7 +1478,7 @@ void user_io_poll() {
 					if(buffer_lba == lba && buffer_drive_index == drive_index) {
 						buffer_lba = 0xffffffff;
 					}
-
+					user_io_sd_ack(drive_index);
 					// Fetch sector data from FPGA ...
 					spi_uio_cmd_cont(UIO_SECTOR_WR);
 					spi_block_read(wr_buf);
@@ -1411,7 +1494,7 @@ void user_io_poll() {
 							IDXWrite(&sd_image[sd_index(drive_index)], wr_buf);
 						}
 					} else if (!drive_index && !umounted)
-						MMC_Write(lba, wr_buf);
+						disk_write(fs.pdrv, wr_buf, lba, 1);
 #else
 					hexdump(wr_buf, 512, 0);
 #endif
@@ -1443,7 +1526,7 @@ void user_io_poll() {
 						// sector read
 						// read sector from sd card if it is not already present in
 						// the buffer
-						MMC_Read(lba, buffer);
+						disk_read(fs.pdrv, buffer, lba, 1);
 					}
 					buffer_lba = lba;
 					DISKLED_OFF;
@@ -1451,7 +1534,7 @@ void user_io_poll() {
 
 				if(buffer_lba == lba) {
 					// hexdump(buffer, 32, 0);
-
+					user_io_sd_ack(drive_index);
 					// data is now stored in buffer. send it to fpga
 					spi_uio_cmd_cont(UIO_SECTOR_RD);
 					spi_block_write(buffer);
@@ -1475,7 +1558,7 @@ void user_io_poll() {
 					// sector read
 					// read sector from sd card if it is not already present in
 					// the buffer
-					MMC_Read(lba+1, buffer);
+					disk_read(fs.pdrv, buffer, lba+1, 1);
 					buffer_lba = lba+1;
 				}
 				buffer_drive_index = drive_index;
@@ -1578,6 +1661,21 @@ void user_io_poll() {
 
 	if(core_type == CORE_TYPE_ARCHIE) 
 		archie_poll();
+
+	if(core_features & FEAT_IDE_MASK)
+	{
+		unsigned char  c1;
+
+		EnableFpga();
+		c1 = SPI(0); // cmd request
+		SPI(0);
+		SPI(0);
+		SPI(0);
+		SPI(0);
+		SPI(0);
+		DisableFpga();
+		HandleHDD(c1, 0, 1);
+	}
 
 	if((core_type == CORE_TYPE_MINIMIG2) ||
 	   (core_type == CORE_TYPE_MIST2) ||
@@ -2254,7 +2352,19 @@ void user_io_kbd(unsigned char m, unsigned char *k, uint8_t priority, unsigned s
 					else
 					{
 						// special OSD key handled internally 
-						if(osd_is_visible) OsdKeySet(usb2amiga(k[i]));
+						if(osd_is_visible)
+							OsdKeySet(usb2amiga(k[i]));
+						else if (((mist_cfg.joystick_autofire_combo == 0 && k[i] == 0x62) ||  // KP0
+						          (mist_cfg.joystick_autofire_combo == 1 && k[i] == 0x2B)) && // TAB
+						          (m & 0x05) == 0x05 && // LCTR+LALT
+						          (core_type == CORE_TYPE_8BIT ||
+						          core_type == CORE_TYPE_ARCHIE ||
+						          core_type == CORE_TYPE_MIST2))
+						{
+							autofire = ((autofire + 1) & 0x03);
+							InfoMessage(config_autofire_msg[autofire]);
+						}
+
 					}
 
 					// no further processing of any key that is currently 
@@ -2378,11 +2488,12 @@ void add_modifiers(uint8_t mod, uint16_t* keys_ps2)
 	}
 }
 
-void user_io_key_remap(char *s) {
+char user_io_key_remap(char *s, char action, int tag) {
+	if (action == INI_SAVE) return 0;
 	// s is a string containing two comma separated hex numbers
 	if((strlen(s) != 5) && (s[2]!=',')) {
 		ini_parser_debugf("malformed entry %s", s);
-		return;
+		return 0;
 	}
 
 	char i;
@@ -2393,9 +2504,10 @@ void user_io_key_remap(char *s) {
 
 			ini_parser_debugf("key remap entry %d = %02x,%02x", 
 			  i, key_remap_table[i][0], key_remap_table[i][1]);
-			return;
+			return 0;
 		}
 	}
+	return 0;
 }
 
 unsigned char user_io_ext_idx(const char *name, const char* ext) {

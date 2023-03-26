@@ -13,6 +13,7 @@
 #include "boot.h"
 #include "user_io.h"
 #include "misc_cfg.h"
+#include "cue_parser.h"
 
 // TODO!
 #define SPIN() asm volatile ( "mov r0, r0\n\t" \
@@ -53,11 +54,6 @@ const char *KickstartSelectedName;
 // TODO: remove these extern hacks to private variables
 extern char DiskInfo[5]; // disk number info of selected entry
 extern unsigned char menusub;
-enum HelpText_Message {HELPTEXT_NONE,HELPTEXT_MAIN,HELPTEXT_HARDFILE,HELPTEXT_CHIPSET,HELPTEXT_MEMORY,HELPTEXT_VIDEO,HELPTEXT_FEATURES};
-extern const char *helptexts[];
-extern const char* HELPTEXT_SPACER;
-extern char helptext_custom[450];
-extern const char *helptext;
 
 ////////////////////////////
 /////// Minimig menu ///////
@@ -89,8 +85,10 @@ static void InsertFloppy(adfTYPE *drive, const unsigned char *name)
 {
 	unsigned char i, j, readonly = false;
 	unsigned long tracks;
+	FRESULT res;
 
-	if (f_open(&drive->file, name, FA_READ | FA_WRITE) != FR_OK) {
+	if ((res = f_open(&drive->file, name, FA_READ | FA_WRITE)) != FR_OK) {
+		iprintf("Disk open failed (%d), trying read only mode\n", res);
 		readonly = true;
 		if (f_open(&drive->file, name, FA_READ) != FR_OK)
 		return;
@@ -121,11 +119,11 @@ static void InsertFloppy(adfTYPE *drive, const unsigned char *name)
 	drive->track_prev = -1;
 
 	// some debug info
-	menu_debugf("Inserting floppy: \"%s\"\r", name);
-	menu_debugf("file readonly: 0x%u\r", readonly);
-	menu_debugf("file size: %llu (%llu KB)\r", f_size(&drive->file), f_size(&drive->file) >> 10);
-	menu_debugf("drive tracks: %u\r", drive->tracks);
-	menu_debugf("drive status: 0x%02X\r", drive->status);
+	iprintf("Inserting floppy: \"%s\"\r", name);
+	iprintf("file readonly: 0x%u\r", readonly);
+	iprintf("file size: %llu (%llu KB)\r", f_size(&drive->file), f_size(&drive->file) >> 10);
+	iprintf("drive tracks: %u\r", drive->tracks);
+	iprintf("drive status: 0x%02X\r", drive->status);
 }
 
 static void inserttestfloppy() {
@@ -152,7 +150,7 @@ static char HardFileChanged(uint8_t idx) {
 			if ((config.hardfile[i].enabled != t_hardfile[i].enabled)
 			    || (strncmp(config.hardfile[i].name, t_hardfile[i].name, sizeof(t_hardfile[0].name)) != 0))
 			{
-				OpenHardfile(i);
+				OpenHardfile(i, true);
 				//if((config.hardfile[0].enabled == HDF_FILE) && !FindRDB(0))
 				//	menustate = MENU_SYNTHRDB1;
 			}
@@ -202,6 +200,20 @@ static char HardFileSelected(uint8_t idx, const char *SelectedName) {
 			config.hardfile[hdf_idx].present = 0;
 	}
 	return 0;
+}
+
+static char CueISOFileSelected(uint8_t idx, const char *SelectedName) {
+	int hdf_idx;
+	if (idx == 10) // master drive selected
+		hdf_idx = t_ide_idx << 1;
+	else if (idx == 12) // slave drive selected
+		hdf_idx = (t_ide_idx << 1) + 1;
+	else // invalid
+		return 0;
+
+	char res;
+	res = cue_parse(SelectedName, &sd_image[hdf_idx]);
+	if (res) ErrorMessage(cue_error_msg[res-1], res);
 }
 
 static char KickstartReload(uint8_t idx) {
@@ -412,6 +424,8 @@ static char GetMenuItem_Minimig(uint8_t idx, char action, menu_item_t *item) {
 					strcpy(s, slave ? "  Slave : " : " Master : ");
 					if(config.hardfile[(t_ide_idx << 1)+slave].enabled==(HDF_FILE|HDF_SYNTHRDB))
 						strcat(s,"Hardfile (filesys)");
+					else if(config.hardfile[(t_ide_idx << 1)+slave].enabled==HDF_CDROM)
+						strcat(s,"CDROM");
 					else
 						strcat(s, config_hdf_msg[config.hardfile[(t_ide_idx << 1)+slave].enabled & HDF_TYPEMASK]);
 					item->item = s;
@@ -422,13 +436,18 @@ static char GetMenuItem_Minimig(uint8_t idx, char action, menu_item_t *item) {
 				case 10:
 				case 12: {
 					uint8_t slave = idx == 12;
+					uint8_t enabled = config.hardfile[(t_ide_idx << 1)+slave].enabled;
 					if (config.hardfile[(t_ide_idx << 1)+slave].present) {
 						strcpy(s, "                                ");
-						strncpy(&s[14], config.hardfile[(t_ide_idx << 1)+slave].name, sizeof(config.hardfile[0].name));
+						if(enabled == HDF_CDROM)
+							strcpy(&s[14], toc.valid ? "* Inserted *" : "* Empty *");
+						else
+							strncpy(&s[14], config.hardfile[(t_ide_idx << 1)+slave].name, sizeof(config.hardfile[0].name));
 					} else
 						strcpy(s, "       ** file not found **");
 					item->item = s;
-					item->active = config.enable_ide[t_ide_idx] && ((config.hardfile[(t_ide_idx << 1)+slave].enabled&HDF_TYPEMASK)==HDF_FILE);
+					item->active = config.enable_ide[t_ide_idx] &&
+					   (((enabled&HDF_TYPEMASK) == HDF_FILE) || ((enabled&HDF_TYPEMASK) == HDF_CDROM));
 					item->stipple = !item->active;
 					}
 					break;
@@ -626,15 +645,35 @@ static char GetMenuItem_Minimig(uint8_t idx, char action, menu_item_t *item) {
 					} else if(config.hardfile[hdf_idx].enabled==(HDF_FILE|HDF_SYNTHRDB)) {
 						config.hardfile[hdf_idx].enabled&=~HDF_SYNTHRDB;
 						config.hardfile[hdf_idx].enabled +=1;
+					} else if(config.hardfile[hdf_idx].enabled==(HDF_CARDPART0+partitioncount)) {
+						// only one CDROM is supported, so check if already choosen
+						if (config.hardfile[0].enabled != HDF_CDROM &&
+						    config.hardfile[1].enabled != HDF_CDROM &&
+						    config.hardfile[2].enabled != HDF_CDROM &&
+						    config.hardfile[3].enabled != HDF_CDROM) {
+							config.hardfile[hdf_idx].enabled = HDF_CDROM;
+						} else {
+							config.hardfile[hdf_idx].enabled = 0;
+						}
+					} else if(config.hardfile[hdf_idx].enabled==HDF_CDROM) {
+						config.hardfile[hdf_idx].enabled = 0;
 					} else {
 						config.hardfile[hdf_idx].enabled +=1;
-						config.hardfile[hdf_idx].enabled %=HDF_CARDPART0+partitioncount;
 					}
 					}
 					break;
 				case 10:
-				case 12:
-					SelectFileNG("HDF", SCAN_LFN, HardFileSelected, 0);
+				case 12: {
+					uint8_t hdf_idx = (t_ide_idx << 1) + (idx == 12);
+					if(config.hardfile[hdf_idx].enabled==HDF_CDROM) {
+						if(toc.valid)
+							toc.valid = 0;
+						else
+							SelectFileNG("CUEISO", SCAN_DIR | SCAN_LFN, CueISOFileSelected, 0);
+					} else {
+						SelectFileNG("HDF", SCAN_LFN, HardFileSelected, 0);
+					}
+					}
 					break;
 
 				// Page 2 - Settings
@@ -663,10 +702,11 @@ static char GetMenuItem_Minimig(uint8_t idx, char action, menu_item_t *item) {
 				case 23:
 				case 24:
 				case 25:
+					CloseMenu();
+					ResetMenu();
 					OsdDisable();
 					SetConfigurationFilename(idx-21);
 					LoadConfiguration(NULL, 0);
-					ResetMenu();
 					break;
 
 				// Page 4 - Save configuration
@@ -876,5 +916,5 @@ static char GetMenuItem_Minimig(uint8_t idx, char action, menu_item_t *item) {
 }
 
 void SetupMinimigMenu() {
-	SetupMenu(GetMenuPage_Minimig, GetMenuItem_Minimig);
+	SetupMenu(GetMenuPage_Minimig, GetMenuItem_Minimig, NULL);
 }

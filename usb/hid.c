@@ -18,7 +18,16 @@
 
 
 static unsigned char kbd_led_state = 0;  // default: all leds off
+static unsigned char keyboards = 0;      // number of detected usb keyboards
 static unsigned char mice      = 0;      // number of detected usb mice
+
+unsigned char get_keyboards(void) {
+	return keyboards;
+}
+
+unsigned char get_mice(void) {
+	return mice;
+}
 
 // up to 8 buttons can be remapped
 #define MAX_JOYSTICK_BUTTON_REMAP 8
@@ -42,14 +51,16 @@ void hid_joystick_button_remap_init(void) {
 	memset(joystick_button_remap, 0, sizeof(joystick_button_remap));
 }
 
-void hid_joystick_button_remap(char *s) {
+char hid_joystick_button_remap(char *s, char action, int tag) {
 	uint8_t i;
 
 	hid_debugf("%s(%s)", __FUNCTION__, s);
 
+	if (action == INI_SAVE) return 0;
+
 	if(strlen(s) < 13) {
 		hid_debugf("malformed entry");
-		return;
+		return 0;
 	}
 
 	// parse remap request
@@ -67,9 +78,10 @@ void hid_joystick_button_remap(char *s) {
 			joystick_button_remap[i].vid, joystick_button_remap[i].pid,
 			joystick_button_remap[i].offset, joystick_button_remap[i].button);
 
-			return;
+			return 0;
 		}
 	}
+	return 0;
 }
 
 /*****************************************************************************/
@@ -203,6 +215,7 @@ static uint8_t usb_hid_parse_conf(usb_device_t *dev, uint8_t conf, uint16_t len)
 					case HID_PROTOCOL_KEYBOARD:
 						hid_debugf("HID protocol is KEYBOARD");
 						info->iface[info->bNumIfaces].device_type = HID_DEVICE_KEYBOARD;
+						keyboards++;
 						break;
 
 					case HID_PROTOCOL_MOUSE:
@@ -235,8 +248,9 @@ static uint8_t usb_hid_parse_conf(usb_device_t *dev, uint8_t conf, uint16_t len)
 
 						// Fill in the endpoint info structure
 						uint8_t epidx = info->bNumIfaces;
-						info->iface[epidx].interval = p->ep_desc.bInterval;
+						info->iface[epidx].interval      = p->ep_desc.bInterval;
 						info->iface[epidx].ep.epAddr     = (p->ep_desc.bEndpointAddress & 0x0F);
+						info->iface[epidx].ep.epType     = (p->ep_desc.bmAttributes & EP_TYPE_MSK);
 						info->iface[epidx].ep.maxPktSize = p->ep_desc.wMaxPacketSize[0];
 						info->iface[epidx].ep.epAttribs  = 0;
 						info->iface[epidx].ep.bmNakPower = USB_NAK_NOWAIT;
@@ -265,19 +279,20 @@ static uint8_t usb_hid_parse_conf(usb_device_t *dev, uint8_t conf, uint16_t len)
 			}
 
 		// advance to next descriptor
+		if (!p->conf_desc.bLength || p->conf_desc.bLength > len) break;
 		len -= p->conf_desc.bLength;
 		p = (union buf_u*)(p->raw + p->conf_desc.bLength);
 	}
 
 	if(len != 0) {
 		hid_debugf("Config underrun: %d", len);
-		return USB_ERROR_CONFIGURAION_SIZE_MISMATCH;
+		return USB_ERROR_CONFIGURATION_SIZE_MISMATCH;
 	}
 
 	return 0;
 }
 
-static uint8_t usb_hid_init(usb_device_t *dev) {
+static uint8_t usb_hid_init(usb_device_t *dev, usb_device_descriptor_t *dev_desc) {
 	hid_debugf("%s(%x)", __FUNCTION__, dev->bAddress);
 
 	uint8_t rcode;
@@ -286,41 +301,35 @@ static uint8_t usb_hid_init(usb_device_t *dev) {
 
 	usb_hid_info_t *info = &(dev->hid_info);
 
-	union {
-		usb_device_descriptor_t dev_desc;
-		usb_configuration_descriptor_t conf_desc;
-	} buf;
+	usb_configuration_descriptor_t conf_desc;
 
 	// reset status
 	info->bPollEnable = false;
 	info->bNumIfaces = 0;
 
 	for(i=0;i<MAX_IFACES;i++) {
-		info->iface[i].qNextPollTime = 0;
+		info->iface[i].qLastPollTime = 0;
 		info->iface[i].ep.epAddr     = i;
+		info->iface[i].ep.epType     = 0;
 		info->iface[i].ep.maxPktSize = 8;
 		info->iface[i].ep.epAttribs  = 0;
 		info->iface[i].ep.bmNakPower = USB_NAK_MAX_POWER;
 	}
 
-	// try to re-read full device descriptor from newly assigned address
-	if(rcode = usb_get_dev_descr( dev, sizeof(usb_device_descriptor_t), &buf.dev_desc ))
-		return rcode;
-
 	// save vid/pid for automatic hack later
-	vid = buf.dev_desc.idVendor;
-	pid = buf.dev_desc.idProduct;
+	vid = dev_desc->idVendor;
+	pid = dev_desc->idProduct;
 
-	uint8_t num_of_conf = buf.dev_desc.bNumConfigurations;
+	uint8_t num_of_conf = dev_desc->bNumConfigurations;
 	//  hid_debugf("number of configurations: %d", num_of_conf);
 
 	for(i=0; i<num_of_conf; i++) {
-		if(rcode = usb_get_conf_descr(dev, sizeof(usb_configuration_descriptor_t), i, &buf.conf_desc)) 
+		if(rcode = usb_get_conf_descr(dev, sizeof(usb_configuration_descriptor_t), i, &conf_desc)) 
 			return rcode;
 
-		usb_dump_conf_descriptor(&buf.conf_desc);
+		usb_dump_conf_descriptor(&conf_desc);
 		// parse directly if it already fitted completely into the buffer
-		usb_hid_parse_conf(dev, i, buf.conf_desc.wTotalLength);
+		usb_hid_parse_conf(dev, i, conf_desc.wTotalLength);
 	}
 
 	// check if we found valid hid interfaces
@@ -330,7 +339,7 @@ static uint8_t usb_hid_init(usb_device_t *dev) {
 	}
 
 	// Set Configuration Value
-	rcode = usb_set_conf(dev, buf.conf_desc.bConfigurationValue);
+	rcode = usb_set_conf(dev, conf_desc.bConfigurationValue);
 	if (rcode) hid_debugf("hid_set_conf error: %d", rcode);
 
 	// process all supported interfaces
@@ -346,7 +355,7 @@ static uint8_t usb_hid_init(usb_device_t *dev) {
 				return rcode;
 			}
 
-			if(info->iface[i].device_type == REPORT_TYPE_NONE) {
+			if(info->iface[i].device_type == HID_DEVICE_UNKNOWN) {
 				// bInterfaceProtocol was 0 ("none") -> try to parse anyway
 				iprintf("HID NONE: report type = %d, size = %d\n",
 				info->iface[i].conf.type, info->iface[i].conf.report_size);
@@ -356,19 +365,19 @@ static uint8_t usb_hid_init(usb_device_t *dev) {
 				if((info->iface[i].conf.type == REPORT_TYPE_KEYBOARD) &&
 				   (info->iface[i].conf.report_size == 8)) {
 				  iprintf("HID NONE: is keyboard (arduino?)\n");
-				  info->iface[i].device_type = REPORT_TYPE_KEYBOARD;
+				  info->iface[i].device_type = HID_DEVICE_KEYBOARD;
 				  info->iface[i].has_boot_mode = true;   // assume that the report is boot mode style as it's 8 bytes in size
 				}
 			}
 
-			if(info->iface[i].device_type == REPORT_TYPE_MOUSE) {
+			if(info->iface[i].device_type == HID_DEVICE_MOUSE) {
 				iprintf("MOUSE: report type = %d, id = %d, size = %d\n", 
 				  info->iface[i].conf.type,
 				  info->iface[i].conf.report_id,
 				  info->iface[i].conf.report_size);
 			}
 
-			if(info->iface[i].device_type == REPORT_TYPE_JOYSTICK) {
+			if(info->iface[i].device_type == HID_DEVICE_JOYSTICK) {
 				char k;
 
 				iprintf("JOYSTICK: report type = %d, id = %d, size = %d\n", 
@@ -455,6 +464,11 @@ static uint8_t usb_hid_release(usb_device_t *dev) {
 			uint8_t c_jindex = joystick_index(info->iface[i].jindex);
 			hid_debugf("releasing joystick #%d, renumbering", c_jindex);
 			joystick_release(c_jindex);
+		}
+
+		// check if a keyboard is released
+		if(info->iface[i].device_type == HID_DEVICE_KEYBOARD) {
+			keyboards--;
 		}
 
 		// check if a mouse is released
@@ -712,7 +726,6 @@ static void usb_process_iface (usb_device_t *dev,
 							}
 						}
 						int hrange = (max - min);
-						int dead = hrange/63;
 
 						// scale to 0-255
 						if (a[i] <= min) a[i] = min;
@@ -722,7 +735,8 @@ static void usb_process_iface (usb_device_t *dev,
 						else
 							a[i] = ((a[i]-min) * 255) / hrange;
 
-						if (a[i] > (127-dead) && a[i] < (127+dead)) a[i] = 127;
+						// apply dead range
+						if (a[i] > (127-mist_cfg.joystick_dead_range) && a[i] < (127+mist_cfg.joystick_dead_range)) a[i] = 127;
 					}
 				}
 
@@ -821,6 +835,7 @@ static void usb_process_iface (usb_device_t *dev,
 				if(a[2] < JOYSTICK_AXIS_TRIGGER_MIN) jmap |= JOY_UP;
 				if(a[2] > JOYSTICK_AXIS_TRIGGER_MAX) jmap |= JOY_DOWN;
 				StateJoySetRight( jmap, idx);
+				StateJoySetAnalogue( a[0], a[1], a[3], a[2], idx );
 				// add it to vjoy (no remapping)
 				vjoy |= jmap<<16;
 
@@ -873,7 +888,7 @@ static uint8_t usb_hid_poll(usb_device_t *dev) {
 		usb_hid_iface_info_t *iface = info->iface+i;
 		if(iface->device_type != HID_DEVICE_UNKNOWN) {
 
-			if (iface->qNextPollTime <= timer_get_msec()) {
+			if (timer_check(iface->qLastPollTime, iface->interval)) { // poll at requested rate
 			//      hid_debugf("poll %d...", iface->ep.epAddr);
 				uint16_t read = iface->ep.maxPktSize;
 				uint8_t buf[iface->ep.maxPktSize];
@@ -886,7 +901,7 @@ static uint8_t usb_hid_poll(usb_device_t *dev) {
 				} else {
 					usb_process_iface (dev, iface, read, buf);
 				}
-				iface->qNextPollTime = timer_get_msec() + iface->interval;   // poll at requested rate
+				iface->qLastPollTime = timer_get_msec();
 			}
 		} // end if known device
 	} // end for loop (bNumIfaces)

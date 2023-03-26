@@ -18,7 +18,7 @@
 #include "user_io.h"
 #include "usb/usb.h"
 #include "misc_cfg.h"
-#include "minimig-menu.h"
+#include "menu-minimig.h"
 
 configTYPE config;
 static configTYPE tmpconf;
@@ -45,7 +45,7 @@ static const ini_var_t config_ini_vars[] = {
   {"AR3_DISABLE",      (void*)&tmpconf.disable_ar3, UINT8, 0, 1, 1},
   {"IDE0_ENABLE",      (void*)&tmpconf.enable_ide[0], UINT8, 0, 1, 1},
   {"IDE1_ENABLE",      (void*)&tmpconf.enable_ide[1], UINT8, 0, 1, 1},
-  {"SCANLINES",        (void*)&tmpconf.scanlines, UINT8, 0, 2, 1},
+  {"SCANLINES",        (void*)&tmpconf.scanlines, UINT8, 0, 15, 1},
   {"HDD0_ENABLE",      (void*)&tmpconf.hardfile[0].enabled, UINT8, 0, 255, 1},
   {"HDD0",             (void*)tmpconf.hardfile[0].name, STRING, 1, 63, 1},
   {"HDD1_ENABLE",      (void*)&tmpconf.hardfile[1].enabled, UINT8, 0, 255, 1},
@@ -103,6 +103,7 @@ char UploadKickstart(char *name)
   UINT br;
   FIL romfile, keyfile;
 
+  ResetMenu();
   ChangeDirectoryName("/");
 
   BootPrint("Checking for Amiga Forever key file:");
@@ -351,7 +352,7 @@ unsigned char LoadConfiguration(char *filename, int printconfig)
   config_ini_cfg.nsections = (int)(sizeof(config_ini_sections) / sizeof(ini_section_t));
   config_ini_cfg.nvars =  (int)(sizeof(config_ini_vars) / sizeof(ini_var_t));
 
-  ini_parse(&config_ini_cfg, 0);
+  ini_parse(&config_ini_cfg, 0, 0);
 
   if(tmpconf.floppy.drives<=4 && tmpconf.kickstart[0]) {
     // If either the old config and new config have a different kickstart file,
@@ -472,11 +473,12 @@ static void ApplyConfiguration(char reloadkickstart)
   for (int i = 0; i < HARDFILES; i++)
     hardfile[i] = &config.hardfile[i];
 
+  ResetMenu();
   ChangeDirectoryName("/");
 
   // Whether or not we uploaded a kickstart image we now need to set various parameters from the config.
   for (int i = 0; i < HARDFILES; i++) {
-    if(OpenHardfile(i)) {
+    if(OpenHardfile(i, true)) {
       switch(hdf[i].type) {
         // Customise message for SD card acces
         case (HDF_FILE | HDF_SYNTHRDB):
@@ -487,6 +489,9 @@ static void ApplyConfiguration(char reloadkickstart)
           break;
         case HDF_CARD:
           siprintf(s, "\nHardfile %d: using entire SD card", i);
+          break;
+        case HDF_CDROM:
+          siprintf(s, "\nHardfile %d: CDROM", i);
           break;
         default:
           siprintf(s, "\nHardfile %d: using SD card partition %d", i, hdf[i].type-HDF_CARD);  // Number from 1
@@ -622,7 +627,7 @@ unsigned char SaveConfiguration(char *filename)
   config_ini_cfg.nvars =  (int)(sizeof(config_ini_vars) / sizeof(ini_var_t));
   memcpy((void*)&tmpconf, (void*)&config, sizeof(config));
 
-  ini_save(&config_ini_cfg);
+  ini_save(&config_ini_cfg, 0);
 
   return(0);
 }

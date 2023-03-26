@@ -8,20 +8,13 @@
 #include <stdio.h>
 
 #include "swab.h"
+#include "scsi.h"
 #include "utils.h"
 #include "storage_control.h"
 #include "fat_compat.h"
 #include "usbdev.h"
-#include "mmc.h"
+#include "FatFs/diskio.h"
 #include "debug.h"
-
-#define SENSEKEY_NO_SENSE        0x0
-#define SENSEKEY_NOT_READY       0x2
-#define SENSEKEY_MEDIUM_ERROR    0x3
-#define SENSEKEY_HARDWARE_ERROR  0x4
-#define SENSEKEY_ILLEGAL_REQUEST 0x5
-#define SENSEKEY_UNIT_ATTENTION  0x6
-#define SENSEKEY_ABORTED_COMMAND 0xB
 
 typedef struct
 {
@@ -49,68 +42,6 @@ typedef struct {
 	uint8_t  bCSWStatus;
 } __attribute__ ((packed)) CSW_t;
 
-typedef struct {
-	uint8_t  DeviceType : 5;
-	uint8_t  DeviceTypeQualifier : 3;
-	uint8_t  DeviceTypeModifier : 7;
-	uint8_t  RemovableMedia : 1;
-	uint8_t  Versions;
-	uint8_t  ResponseDataFormat : 4;
-	uint8_t  HiSupport : 1;
-	uint8_t  NormACA : 1;
-	uint8_t  ReservedBit : 1;
-	uint8_t  AERC : 1;
-	uint8_t  AdditionalLength;
-	uint8_t  Reserved[2];
-	uint8_t  SoftReset : 1;
-	uint8_t  CommandQueue : 1;
-	uint8_t  Reserved2 : 1;
-	uint8_t  LinkedCommands : 1;
-	uint8_t  Synchronous : 1;
-	uint8_t  Wide16Bit : 1;
-	uint8_t  Wide32Bit : 1;
-	uint8_t  RelativeAddressing : 1;
-	uint8_t  VendorId[8];
-	uint8_t  ProductId[16];
-	uint8_t  ProductRevisionLevel[4];
-	uint8_t  VendorSpecific[20];
-	uint8_t  Reserved3[2];
-	uint8_t  VersionDescriptors[8];
-	uint8_t  Reserved4[30];
-} __attribute__ ((packed)) INQUIRYDATA_t;
-
-typedef struct {
-	uint8_t  ErrorCode  :7;
-	uint8_t  Valid  :1;
-	uint8_t  SegmentNumber;
-	uint8_t  SenseKey  :4;
-	uint8_t  Reserved  :1;
-	uint8_t  IncorrectLength  :1;
-	uint8_t  EndOfMedia  :1;
-	uint8_t  FileMark  :1;
-	uint8_t  Information[4];
-	uint8_t  AdditionalSenseLength;
-	uint8_t  CommandSpecificInformation[4];
-	uint8_t  AdditionalSenseCode;
-	uint8_t  AdditionalSenseCodeQualifier;
-	uint8_t  FieldReplaceableUnitCode;
-	uint8_t  SenseKeySpecific[3];
-} __attribute__ ((packed)) SENSEDATA_t;
-
-typedef struct {
-	uint32_t LBA;
-	uint32_t blocklen;
-} __attribute__ ((packed)) CAPACITYDATA_t;
-
-typedef struct {
-	uint8_t  Reserved[3];
-	uint8_t  Length;
-	uint32_t Blocks;
-	uint8_t  DescriptorType  :1;
-	uint8_t  Reserved2 : 7;
-	uint8_t  Blocklen[3];
-} __attribute__ ((packed)) FORMATCAPACITYDATA_t;
-
 static void clear_sense() {
 	sense.key = sense.asc = sense.ascq = 0;
 }
@@ -137,7 +68,9 @@ static void scsi_inquiry(uint8_t *cmd) {
 
 static void scsi_readcapacity(uint8_t *cmd) {
 	CAPACITYDATA_t cap;
-	cap.LBA = swab32(MMC_GetCapacity()-1);
+	uint32_t capacity;
+	disk_ioctl(fs.pdrv, GET_SECTOR_COUNT, &capacity);
+	cap.LBA = swab32(capacity-1);
 	cap.blocklen = swab32(512);
 	usb_storage_write((const char*) &cap, sizeof(CAPACITYDATA_t));
 }
@@ -164,14 +97,14 @@ static void scsi_mode_sense(uint8_t *cmd) {
 		sector_buffer[0] = 0x00;
 		sector_buffer[1] = datalen-2;
 		sector_buffer[2] = 0;
-		sector_buffer[3] = mmc_write_protected() ? 0x80 : 0x00;
+		sector_buffer[3] = (fat_uses_mmc() && mmc_write_protected()) ? 0x80 : 0x00;
 		sector_buffer[4] = sector_buffer[5] = sector_buffer[6] = sector_buffer[7] = 0;
 	} else {
 		len = cmd[4]; // MODE SENSE6
 		datalen = 4;
 		sector_buffer[0] = datalen-1;
 		sector_buffer[1] = 0;
-		sector_buffer[2] = mmc_write_protected() ? 0x80 : 0x00;
+		sector_buffer[2] = (fat_uses_mmc() && mmc_write_protected()) ? 0x80 : 0x00;
 		sector_buffer[3] = 0;
 	}
 	usb_storage_write(sector_buffer, MIN(len, datalen));
@@ -181,9 +114,11 @@ static void scsi_read_format_capacities(uint8_t *cmd) {
 	uint16_t len = cmd[7]<<8 | cmd[8];
 	FORMATCAPACITYDATA_t dat;
 
+	uint32_t capacity;
+	disk_ioctl(fs.pdrv, GET_SECTOR_COUNT, &capacity);
 	memset(&dat, 0, sizeof(FORMATCAPACITYDATA_t));
 	dat.Length = 8;
-	dat.Blocks = MMC_GetCapacity();
+	dat.Blocks = capacity;
 	dat.Blocklen[1] = 0x02; // 512 bytes
 	usb_storage_write((const char*) &dat, MIN(len, sizeof(FORMATCAPACITYDATA_t)));
 }
@@ -196,10 +131,9 @@ static uint8_t scsi_read(uint8_t *cmd) {
 		uint8_t ret;
 		uint16_t read = MIN(len, SECTOR_BUFFER_SIZE/512);
 		DISKLED_ON
-		if (len == 1) ret=MMC_Read(lba, sector_buffer);
-		else ret=MMC_ReadMultiple(lba, sector_buffer, read);
+		ret = disk_read(fs.pdrv, sector_buffer, lba, read);
 		DISKLED_OFF
-		if (!ret) {
+		if (ret) {
 			iprintf("STORAGE: Error reading from MMC (lba=%d, len=%d)\n", lba, len);
 			return 0;
 		}
@@ -231,10 +165,9 @@ static uint8_t scsi_write(uint8_t *cmd) {
 		}
 		//hexdump(sector_buffer, write*512, 0);
 		DISKLED_ON
-		if (write == 1) ret = MMC_Write(lba, sector_buffer);
-		else ret = MMC_WriteMultiple(lba, sector_buffer, write);
+		ret = disk_write(fs.pdrv, sector_buffer, lba, write);
 		DISKLED_OFF
-		if (!ret) return 0;
+		if (ret) return 0;
 		lba+=write;
 		len-=write;
 	}

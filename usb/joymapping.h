@@ -37,6 +37,7 @@
 #define JOYSTICK_ALIAS_RETROLINK_GC 	"Retrolink N64/GC"
 #define JOYSTICK_ALIAS_RETROLINK_NES 	"Retrolink NES"
 #define JOYSTICK_ALIAS_RETRO_FREAK 	  "Retro Freak gamepad"
+#define JOYSTICK_ALIAS_RETRO_GAMES_THEGAMEPAD	"Retro Games THEGAMEPAD"
 #define JOYSTICK_ALIAS_ROYDS_EX 			"ROYDS Stick.EX"
 #define JOYSTICK_ALIAS_SPEEDLINK_COMP "Speedlink Competition Pro"
 #define JOYSTICK_ALIAS_XBOX "Xbox360 Controller"
@@ -49,11 +50,22 @@
 #define VID_DAPTOR 		0x04D8
 #define VID_RETROLINK 0x0079
 
+typedef struct {
+    uint16_t vid;
+    uint16_t pid;
+    uint16_t mapping[16];
+    int      tag;
+} joymapping_t;
+
 /*****************************************************************************/
 
 // INI parsing
-void virtual_joystick_remap_init(void);
-void virtual_joystick_remap(char *);
+void virtual_joystick_remap_init(char);
+char virtual_joystick_remap(char *, char, int);
+
+// add new mapping
+void virtual_joystick_remap_update(joymapping_t*);
+void virtual_joystick_tag_update(uint16_t vid, uint16_t pid, int newtag);
 
 // runtime mapping
 uint16_t virtual_joystick_mapping (uint16_t vid, uint16_t pid, uint16_t joy_input);
@@ -65,7 +77,7 @@ char* get_joystick_alias( uint16_t vid, uint16_t pid );
 
 // INI parsing
 void joystick_key_map_init(void);
-void joystick_key_map(char *);
+char joystick_key_map(char *, char, int);
 
 // runtime mapping
 bool virtual_joystick_keyboard ( uint16_t vjoy );

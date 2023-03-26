@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdbool.h>
 #include "mmc.h"
 #include "fat_compat.h"
 #include "fpga.h"
@@ -8,24 +9,62 @@
 #include "utils.h"
 
 #include "FatFs/ff.h"
+#include "FatFs/diskio.h"
 
 unsigned char sector_buffer[SECTOR_BUFFER_SIZE]; // sector buffer for one CDDA sector (or 4 SD sector)
 struct PartitionEntry partitions[4];             // lbastart and sectors will be byteswapped as necessary
 int partitioncount;
 
 FATFS fs;
-
+char fat_device = 0;
 uint32_t      iPreviousDirectory = 0;
 
 #define PATHLEN 255
 static char cwd[PATHLEN];
 
 int8_t fat_uses_mmc(void) {
-	return(1);
+	return(fat_device == 0);
 }
 
 int8_t fat_medium_present() {
-	return MMC_CheckCard();
+	if (fat_device == 0)
+		return MMC_CheckCard();
+	else
+		return 1;
+}
+
+void fat_switch_to_usb() {
+	fat_device = 1;
+}
+
+static char fs_type_none[] = "NONE";
+static char fs_type_fat12[] = "FAT12";
+static char fs_type_fat16[] = "FAT16";
+static char fs_type_fat32[] = "FAT32";
+static char fs_type_exfat[] = "EXFAT";
+static char fs_type_unknown[] = "UNKNOWN";
+
+char *fs_type_to_string(void) {
+	switch (fs.fs_type) {
+	case 0:
+		return (char *)&fs_type_none;
+		break;
+	case FS_FAT12:
+		return (char *)&fs_type_fat12;
+		break;
+	case FS_FAT16:
+		return (char *)&fs_type_fat16;
+		break;
+	case FS_FAT32:
+		return (char *)&fs_type_fat32;
+		break;
+	case FS_EXFAT:
+		return (char *)&fs_type_exfat;
+		break;
+	default:
+		return (char *)&fs_type_unknown;
+		break;
+	}
 }
 
 // Convert XXXXXXXXYYY to XXXXXXXX.YYY
@@ -44,9 +83,9 @@ void fnameconv(char dest[11+2], const char *src) {
 // FindDrive() checks if a card is present and contains FAT formatted primary partition
 unsigned char FindDrive(void) {
 
+	char res;
 	partitioncount=0;
-	if (!MMC_Read(0, sector_buffer)) // read MBR
-		return(0);
+	if (disk_read(0, sector_buffer, 0, 1)) return(0);
 
 	struct MasterBootRecord *mbr=(struct MasterBootRecord *)sector_buffer;
 	memcpy(&partitions[0],&mbr->Partition[0],sizeof(struct PartitionEntry));
@@ -73,26 +112,7 @@ unsigned char FindDrive(void) {
 	// some debug output
 
 	iprintf("Partition type: ");
-	switch (fs.fs_type) {
-	case 0:
-		iprintf("NONE");
-		break;
-	case FS_FAT12:
-		iprintf("FAT12");
-		break;
-	case FS_FAT16:
-		iprintf("FAT16");
-		break;
-	case FS_FAT32:
-		iprintf("FAT32");
-		break;
-	case FS_EXFAT:
-		iprintf("EXFAT");
-		break;
-	default:
-		iprintf("UNKNOWN");
-		break;
-	}
+	iprintf(fs_type_to_string());
 	iprintf("\n");
 	iprintf("fat_size: %lu\n", fs.fsize);
 	iprintf("fat_number: %u\n", fs.n_fats);
@@ -374,6 +394,9 @@ char ScanDirectory(unsigned long mode, char *extension, unsigned char options) {
 		find_dir = options & FIND_DIR;
 	}
 
+	//enable caching in the sector buffer while traversing the directory,
+	//because FatFs is inefficiently using single sector reads
+	disk_cache_set(true, fs.database);
 	f_rewinddir(&dir);
 	nNewEntries = 0;
 	while (1) {
@@ -533,6 +556,7 @@ char ScanDirectory(unsigned long mode, char *extension, unsigned char options) {
 			}
 		}
 	}
+	disk_cache_set(false, 0);
 
 	if (nNewEntries) {
 		if (mode == SCAN_NEXT_PAGE) {

@@ -212,7 +212,7 @@ void archie_init(void) {
     if(f_size(&file) == sizeof(archie_config_t))
       f_read(&file, &config, sizeof(archie_config_t), &br);
     else
-      archie_debugf("Unexpected config size %d != %d", f_size(&file), sizeof(archie_config_t));
+      archie_debugf("Unexpected config size %llu != %u", f_size(&file), sizeof(archie_config_t));
     f_close(&file);
   } else
     archie_debugf("No %.11s config found", CONFIG_FILENAME);
@@ -247,8 +247,8 @@ void archie_init(void) {
   hardfile[0] = &config.hardfile[0];
   hardfile[1] = &config.hardfile[1];
 
-  OpenHardfile(0);
-  OpenHardfile(1);
+  OpenHardfile(0, true);
+  OpenHardfile(1, true);
 
   archie_kbd_send(STATE_RAK1, HRST);
   ack_timeout = GetTimer(20);  // give archie 20ms to reply
@@ -589,5 +589,5 @@ static char archie_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 
 void archie_setup_menu()
 {
-	SetupMenu(archie_getmenupage, archie_getmenuitem);
+	SetupMenu(archie_getmenupage, archie_getmenuitem, NULL);
 }

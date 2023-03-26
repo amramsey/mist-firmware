@@ -63,6 +63,7 @@ typedef struct {
 
 typedef char (*menu_get_items_t)(uint8_t, char, menu_item_t*);
 typedef char (*menu_get_page_t)(uint8_t, char, menu_page_t*);
+typedef char (*menu_key_event_t)(uint8_t);
 typedef char (*menu_select_file_t)(uint8_t, const char*);
 typedef char (*menu_dialog_t)(uint8_t);
 
@@ -70,15 +71,23 @@ void DialogBox(const char *message, char options, menu_dialog_t);
 void SelectFile(char* pFileExt, unsigned char Options, unsigned char MenuSelect, char chdir);
 void SelectFileNG(char *pFileExt, unsigned char Options, menu_select_file_t callback, char chdir);
 void SetupSystemMenu();
-void SetupMenu(menu_get_page_t, menu_get_items_t);
+void SetupMenu(menu_get_page_t, menu_get_items_t, menu_key_event_t);
 void CloseMenu();
 void ResetMenu();
 void ClosePage();
 void ChangePage(char);
 
 void HandleUI(void);
+void ErrorMessage(const char *message, unsigned char code);
 void InfoMessage(const char *message);
 
 extern const char *config_cpu_msg[];
+extern const char *config_autofire_msg[];
+
+enum HelpText_Message {HELPTEXT_NONE,HELPTEXT_MAIN,HELPTEXT_HARDFILE,HELPTEXT_CHIPSET,HELPTEXT_MEMORY,HELPTEXT_VIDEO,HELPTEXT_FEATURES,HELPTEXT_INPUT};
+extern const char *helptexts[];
+extern const char* HELPTEXT_SPACER;
+extern char helptext_custom[450];
+extern const char *helptext;
 
 #endif

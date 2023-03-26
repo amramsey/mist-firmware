@@ -59,6 +59,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "usbdev.h"
 #include "cdc_control.h"
 #include "storage_control.h"
+#include "FatFs/diskio.h"
 
 #ifndef _WANT_IO_LONG_LONG
 #error "newlib lacks support of long long type in IO functions. Please use a toolchain that was compiled with option --enable-newlib-io-long-long."
@@ -68,6 +69,8 @@ const char version[] = {"$VER:ATH" VDATE};
 
 unsigned char Error;
 char s[FF_LFN_BUF + 1];
+
+unsigned long storage_size = 0;
 
 void FatalError(unsigned long error) {
   unsigned long i;
@@ -106,6 +109,19 @@ void HandleFpga(void) {
 
 extern void inserttestfloppy();
 
+#ifdef USB_STORAGE
+int GetUSBStorageDevices()
+{
+  uint32_t to = GetTimer(2000);
+
+  // poll usb 2 seconds or until a mass storage device becomes ready
+  while(!storage_devices && !CheckTimer(to))
+    usb_poll();
+
+  return storage_devices;
+}
+#endif
+
 int main(void)
 {
     uint8_t mmc_ok = 0;
@@ -133,33 +149,42 @@ int main(void)
     if(MMC_Init()) mmc_ok = 1;
     else           spi_fast();
 
-    // TODO: If MMC fails try to wait for USB storage
-
     iprintf("spiclk: %u MHz\r", GetSPICLK());
 
     usb_init();
 
-    // mmc init failed, try to wait for usb
-    if(!mmc_ok) {
-      uint32_t to = GetTimer(2000);
+    InitADC();
 
 #ifdef USB_STORAGE
-      // poll usb 2 seconds or until a mass storage device becomes ready
-      while(!storage_devices && !CheckTimer(to)) 
-	usb_poll();
+    if(UserButton()) USB_BOOT_VAR = (USB_BOOT_VAR == USB_BOOT_VALUE) ? 0 : USB_BOOT_VALUE;
 
-      // no usb storage device after 2 seconds ...
-      if(!storage_devices)
-        FatalError(1);	
-
-      fat_switch_to_usb();  // redirect file io to usb
-#else
-      FatalError(1);	
+    if(USB_BOOT_VAR == USB_BOOT_VALUE)
+      if (!GetUSBStorageDevices()) {
+        if(!mmc_ok)
+          FatalError(1);
+      } else
+        fat_switch_to_usb();  // redirect file io to usb
+    else {
 #endif
+      if(!mmc_ok) {
+#ifdef USB_STORAGE
+        if(!GetUSBStorageDevices())
+          FatalError(1);
+
+        fat_switch_to_usb();  // redirect file io to usb
+#else
+        FatalError(1);
+#endif
+      }
+#ifdef USB_STORAGE
     }
+#endif
 
     if (!FindDrive())
         FatalError(2);
+
+    disk_ioctl(fs.pdrv, GET_SECTOR_COUNT, &storage_size);
+    storage_size >>= 11;
 
     ChangeDirectoryName("/");
 
@@ -172,10 +197,18 @@ int main(void)
     // tos config also contains cdc redirect settings used by minimig
     tos_config_load(-1);
 
-    char mod = 0;
+    char mod = -1;
 
-    if((USB_LOAD_VAR != USB_LOAD_VALUE) && !user_io_dip_switch1())
+    if((USB_LOAD_VAR != USB_LOAD_VALUE) && !user_io_dip_switch1()) {
         mod = arc_open("/CORE.ARC");
+    } else {
+        user_io_detect_core_type();
+        if(user_io_core_type() != CORE_TYPE_UNKNOWN && !user_io_create_config_name(s, "ARC", CONFIG_ROOT)) {
+            // when loaded from USB, try to load the development ARC file
+            iprintf("Load development ARC: %s\n", s);
+            mod = arc_open(s);
+        }
+    }
 
     if(mod < 0 || !strlen(arc_get_rbfname())) {
         fpga_init(NULL); // error opening default ARC, try with default RBF

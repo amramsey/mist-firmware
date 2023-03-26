@@ -13,10 +13,11 @@
 #include "debug.h"
 #include "user_io.h"
 #include "data_io.h"
-#include "mmc.h"
 #include "ikbd.h"
 #include "idxfile.h"
 #include "font.h"
+#include "mmc.h"
+#include "FatFs/diskio.h"
 
 #define CONFIG_FILENAME  "MIST    CFG"
 
@@ -208,7 +209,7 @@ void tos_set_direct_hdd(char on) {
 
   if(on) {
     tos_debugf("ACSI: enable direct sd access");
-    hdd_direct = MMC_GetCapacity();
+    disk_ioctl(fs.pdrv, GET_SECTOR_COUNT, &hdd_direct);
 
     tos_debugf("ACSI: Direct capacity = %ld (%ld Bytes)", hdd_direct, hdd_direct*512);
     config.system_ctrl |= TOS_ACSI0_ENABLE;
@@ -339,14 +340,14 @@ static void handle_acsi(unsigned char *buffer) {
         if(lba+length <= blocks) {
           DISKLED_ON;
 #ifndef SD_NO_DIRECT_MODE
-          if (user_io_core_type() == CORE_TYPE_MIST2) {
+          if (user_io_core_type() == CORE_TYPE_MIST2 && fat_uses_mmc()) {
             // SD-Card -> FPGA direct SPI transfer on MIST2
             spi_speed = spi_get_speed();
             mist2_spi_set_speed(spi_newspeed);
             if(hdd_direct && target == 0) {
               if(user_io_dip_switch1()) 
                 tos_debugf("ACSI: direct read %ld", lba);
-              MMC_ReadMultiple(lba, 0, length);
+              disk_read(fs.pdrv, 0, lba, length);
             } else {
               IDXSeek(&sd_image[target+2], lba);
               FileReadBlockEx(&sd_image[target+2].file, 0, length);
@@ -358,7 +359,7 @@ static void handle_acsi(unsigned char *buffer) {
               if(hdd_direct && target == 0) {
                 if(user_io_dip_switch1())
                   tos_debugf("ACSI: direct read %ld", lba);
-                MMC_Read(lba++, sector_buffer);
+                disk_read(fs.pdrv, sector_buffer, lba++, 1);
               } else {
                 IDXSeek(&sd_image[target+2], lba);
                 FileReadBlock(&sd_image[target+2].file, sector_buffer);
@@ -416,10 +417,7 @@ static void handle_acsi(unsigned char *buffer) {
             if(hdd_direct && target == 0) {
               if(user_io_dip_switch1()) 
                 tos_debugf("ACSI: direct write %ld", lba);
-              if (blocklen == 1)
-                MMC_Write(lba, sector_buffer);
-              else
-                MMC_WriteMultiple(lba, sector_buffer, blocklen);
+              disk_write(fs.pdrv, sector_buffer, lba, blocklen);
             } else {
               IDXSeek(&sd_image[target+2], lba);
               f_write(&sd_image[target+2].file, sector_buffer, blocklen*512, &bw);
@@ -926,7 +924,7 @@ static void tos_upload_mist1(const char *name) {
     }
 #endif
 
-    time = GetTimer(0);
+    time = GetRTTC();
     tos_debugf("Uploading ...");
 
     for(i=0;i<blocks;i++) {
@@ -1003,9 +1001,9 @@ static void tos_upload_mist1(const char *name) {
     }
 #endif
 
-    time = GetTimer(0) - time;
+    time = GetRTTC() - time;
     tos_debugf("TOS.IMG uploaded in %lu ms (%d kB/s / %d kBit/s)", 
-      time >> 20, f_size(&file)/(time >> 20), 8*f_size(&file)/(time >> 20));
+      time, f_size(&file)/(time >> 20), 8*f_size(&file)/time);
     f_close(&file);
   } else {
     tos_debugf("Unable to find tos.img");
@@ -1074,13 +1072,12 @@ void tos_upload(const char *name) {
   // let cpu run (release reset)
   config.system_ctrl &= ~TOS_CONTROL_CPU_RESET;
 
-  // send ethernet config, too
-  if (eth_present)
-    config.system_ctrl |= TOS_CONTROL_ETHERNET;
-  else
-    config.system_ctrl &= ~TOS_CONTROL_ETHERNET;
+  unsigned long system_ctrl = config.system_ctrl;;
 
-  mist_set_control(config.system_ctrl);
+  // adjust for detected ethernet adapter
+  if (!eth_present) system_ctrl &= ~TOS_CONTROL_ETHERNET;
+
+  mist_set_control(system_ctrl);
 }
 
 
@@ -1395,6 +1392,7 @@ static const char* atari_chipset[]={"ST","STE","MegaSTE","STEroids"};
 static const char *config_tos_mem[] =  {"512 kB", "1 MB", "2 MB", "4 MB", "8 MB", "14 MB", "--", "--" };
 static const char *config_tos_wrprot[] =  {"none", "A:", "B:", "A: and B:"};
 static const char *config_tos_usb[] =  {"none", "control", "debug", "serial", "parallel", "midi"};
+static const char *config_tos_cart[] = {"File", "Ethernec", "Cubase"};
 
 static char tos_file_selected(uint8_t idx, const char *SelectedName) {
 
@@ -1413,7 +1411,7 @@ static char tos_file_selected(uint8_t idx, const char *SelectedName) {
 		case 16:  // TOS
 			tos_upload(SelectedName);
 			break;
-		case 17:  // Cart
+		case 18:  // Cart
 			tos_load_cartridge(SelectedName);
 			break;
 	}
@@ -1447,8 +1445,8 @@ static char tos_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 	item->item = "";
 	if(idx<=6) item->page = 0;
 	else if(idx<=13) item->page = 1;
-	else if(idx<=20) item->page = 2;
-	else if(idx<=27) item->page = 3;
+	else if(idx<=21) item->page = 2;
+	else if(idx<=28) item->page = 3;
 	else if(idx<=33) item->page = 6;
 	else if(idx<=39) item->page = 4;
 	else if(idx<=45) item->page = 5;
@@ -1539,33 +1537,45 @@ static char tos_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 					strcat(s, tos_get_image_name());
 					item->item = s;
 					break;
-				case 17:
+				case 17: {
+					uint8_t cartport = ((tos_system_ctrl() & TOS_CONTROL_ETHERNET) ? 1 : 0) |
+					                   ((tos_system_ctrl() & TOS_CONTROL_CUBASE) ? 2 : 0);
+					strcpy(s, " Cart.port: ");
+					strcat(s, config_tos_cart[cartport]);
+					item->item = s;
+					}
+					break;
+				case 18:
 					strcpy(s, " Cartridge: ");
 					strcat(s, tos_get_cartridge_name());
 					item->item = s;
+					if (tos_system_ctrl() & (TOS_CONTROL_ETHERNET | TOS_CONTROL_CUBASE)) {
+						item->active = 0;
+						item->stipple = 1;
+					}
 					break;
-				case 18:
+				case 19:
 					strcpy(s, " USB I/O:   ");
 					strcat(s, config_tos_usb[tos_get_cdc_control_redirect()]);
 					item->item = s;
 					break;
-				case 19:
+				case 20:
 					item->item = " Reset";
 					break;
-				case 20:
+				case 21:
 					item->item = " Cold boot";
 					break;
 
 				// Page 3 - A/V
 				case 1:
-				case 21:
+				case 22:
 					strcpy(s, " Screen:        ");
 					if (idx==1) strcat(s, "     ");
 					if(tos_system_ctrl() & TOS_CONTROL_VIDEO_COLOR) strcat(s, "Color");
 					else                                            strcat(s, "Mono");
 					item->item = s;
 					break;
-				case 22: // Viking card can only be enabled with max 8MB RAM
+				case 23: // Viking card can only be enabled with max 8MB RAM
 					enable = (tos_system_ctrl()&0xe) <= TOS_MEMCONFIG_8M;
 					strcpy(s, " Viking/SM194:  ");
 					strcat(s, ((tos_system_ctrl() & TOS_CONTROL_VIKING) && enable)?"on":"off");
@@ -1573,7 +1583,7 @@ static char tos_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 					item->active = enable;
 					item->stipple = !enable;
 					break;
-				case 23:
+				case 24:
 					// Blitter is always present in >= STE
 					enable = (tos_system_ctrl() & (TOS_CONTROL_STE | TOS_CONTROL_MSTE))?1:0;
 					strcpy(s, " Blitter:       ");
@@ -1582,13 +1592,13 @@ static char tos_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 					item->active = !enable;
 					item->stipple = enable;
 					break;
-				case 24:
+				case 25:
 					strcpy(s, " Chipset:       ");
 					// extract  TOS_CONTROL_STE and  TOS_CONTROL_MSTE bits
 					strcat(s, atari_chipset[(tos_system_ctrl()>>23)&3]);
 					item->item = s;
 					break;
-				case 25:
+				case 26:
 					if(user_io_core_type() == CORE_TYPE_MIST) {
 						item->item = " Video adjust";
 						item->newpage = 6;
@@ -1598,12 +1608,12 @@ static char tos_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 						item->item = s;
 					}
 					break;
-				case 26:
+				case 27:
 					strcpy(s, " YM-Audio:      ");
 					strcat(s, stereo[(tos_system_ctrl() & TOS_CONTROL_STEREO)?1:0]);
 					item->item = s;
 					break;
-				case 27:
+				case 28:
 					if(user_io_core_type() == CORE_TYPE_MIST) {
 						item->item = "";
 						item->active = 0;
@@ -1718,49 +1728,61 @@ static char tos_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 				case 16:  // TOS
 					SelectFileNG("IMG", SCAN_LFN, tos_file_selected, 0);
 					break;
-				case 17:  // Cart
+				case 17: {
+					unsigned long system_ctrl = tos_system_ctrl();
+					uint8_t cartport = ((system_ctrl & TOS_CONTROL_ETHERNET) ? 1 : 0) |
+					                   ((system_ctrl & TOS_CONTROL_CUBASE) ? 2 : 0);
+					cartport += 1;
+					if (cartport>2) cartport = 0;
+					system_ctrl &= ~(TOS_CONTROL_ETHERNET | TOS_CONTROL_CUBASE);
+					if (cartport & 1) system_ctrl |= TOS_CONTROL_ETHERNET;
+					if (cartport & 2) system_ctrl |= TOS_CONTROL_CUBASE;
+					tos_update_sysctrl(system_ctrl);
+					}
+					break;
+				case 18:  // Cart
 					// if a cart name is set, then remove it
 					if(tos_cartridge_is_inserted()) {
 						tos_load_cartridge("");
 					} else
 						SelectFileNG("IMG", SCAN_LFN, tos_file_selected, 0);
 					break;
-				case 18:
+				case 19:
 					if(tos_get_cdc_control_redirect() == CDC_REDIRECT_MIDI) 
 						tos_set_cdc_control_redirect(CDC_REDIRECT_NONE);
 					else 
 						tos_set_cdc_control_redirect(tos_get_cdc_control_redirect()+1);
 					break;
-				case 19:  // Reset
+				case 20:  // Reset
 					tos_reset(0);
 					CloseMenu();
 					break;
-				case 20:  // Cold Boot
+				case 21:  // Cold Boot
 					tos_reset(1);
 					CloseMenu();
 					break;
 
 				case 1:
-				case 21:
+				case 22:
 					tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_VIDEO_COLOR);
 					break;
-				case 22:
+				case 23:
 					// viking/sm194
 					tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_VIKING);
 					break;
-				case 23:
+				case 24:
 					if(!(tos_system_ctrl() & TOS_CONTROL_STE)) {
 						tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_BLITTER );
 					}
 					break;
-				case 24: {
+				case 25: {
 					unsigned long chipset = (tos_system_ctrl() >> 23)+1;
 					if(chipset == 4) chipset = 0;
 					tos_update_sysctrl(tos_system_ctrl() & ~(TOS_CONTROL_STE | TOS_CONTROL_MSTE) |
 						 (chipset << 23));
 					}
 					break;
-				case 25:
+				case 26:
 					if(user_io_core_type() == CORE_TYPE_MIST) {
 						item->newpage = 6;
 					} else {
@@ -1769,10 +1791,10 @@ static char tos_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 						tos_update_sysctrl((tos_system_ctrl() & ~TOS_CONTROL_SCANLINES) | (scan << 20));
 					}
 					break;
-				case 26:
+				case 27:
 					tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_STEREO);
 					break;
-				case 27:
+				case 28:
 					tos_update_sysctrl(tos_system_ctrl() ^ TOS_CONTROL_BLEND);
 					break;
 				case 29:
@@ -1835,5 +1857,5 @@ static char tos_getmenuitem(uint8_t idx, char action, menu_item_t *item) {
 }
 
 void tos_setup_menu() {
-	SetupMenu(tos_getmenupage, tos_getmenuitem);
+	SetupMenu(tos_getmenupage, tos_getmenuitem, NULL);
 }

@@ -22,14 +22,13 @@ uint8_t max3421e_read_u08(uint8_t reg) {
   return ret;
 }
 
-uint8_t *max3421e_write(uint8_t reg, uint8_t n, uint8_t* data) {
+const uint8_t *max3421e_write(uint8_t reg, uint8_t n, const uint8_t* data) {
 
   spi_max_start();
   spi8(reg | MAX3421E_WRITE);
 
   spi_write(data, n);
   spi_max_end();
-
   return data+n;
 }
 
@@ -157,9 +156,9 @@ uint8_t max3421e_poll() {
 
   // do LED animation on V1.3+ boards if enabled via cfg file
   if(mist_cfg.led_animation) {
-    static msec_t next = 0;
+    static msec_t last = 0;
 
-    if(timer_get_msec() > next) {
+    if(timer_check(last, 100)) {
       static uint8_t led_pattern = 0x01;
     
       // iprintf("irq src=%x, bus state %x\n", hirq, vbusState);
@@ -177,7 +176,7 @@ uint8_t max3421e_poll() {
 	if(!(led_pattern & 0x0f)) led_pattern = 0x01;
       }
       
-      next = timer_get_msec() + 100;
+      last = timer_get_msec();
     }
   }
 

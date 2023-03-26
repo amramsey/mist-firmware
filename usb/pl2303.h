@@ -52,8 +52,8 @@ typedef enum { PL2303_TYPE_UNKNOWN, PL2303_TYPE_0, PL2303_TYPE_1, PL2303_TYPE_HX
 typedef struct {
   ep_t ep[3];
   pl2303_type_t type;
-  uint32_t qNextBulkPollTime;    // next bulk poll time
-  uint32_t qNextIrqPollTime;     // next irq poll time
+  uint32_t qLastBulkPollTime;    // last bulk poll time
+  uint32_t qLastIrqPollTime;     // last irq poll time
   uint8_t ep_int_idx;            // index of interrupt ep
   uint8_t ep_bulk_in_idx;        // 
   uint8_t ep_bulk_out_idx;       //
@@ -76,5 +76,6 @@ void pl2303_tx_byte(uint8_t byte);
 uint8_t pl2303_rx_available(void);
 uint8_t pl2303_rx(void);
 int8_t pl2303_is_blocked(void);
+uint8_t get_pl2303s(void);
 
 #endif // PL2303_H

@@ -7,7 +7,8 @@
 #endif
 
 #define SECTOR_AUDIO 0
-#define SECTOR_DATA 1
+#define SECTOR_DATA_MODE1 1
+#define SECTOR_DATA_MODE2 2
 
 #define CUE_RES_OK       0
 #define CUE_RES_NOTFOUND 1
@@ -26,9 +27,9 @@ typedef struct
 
 typedef struct
 {
+        int valid;
         int end;
         int last;
-        int sectorSize;
         cd_track_t tracks[100];
 #ifndef CUE_PARSER_TEST
         IDXFile *file; // the .bin file
@@ -43,6 +44,7 @@ typedef struct
 } msf_t;
 
 extern toc_t toc;
+extern const char *cue_error_msg[];
 
 #ifdef CUE_PARSER_TEST
 char cue_parse(const char *filename);

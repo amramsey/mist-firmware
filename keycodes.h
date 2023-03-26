@@ -444,14 +444,14 @@ const unsigned short usb2ps2_set1[] = {
   0x43,  // 42: F9
   0x44,  // 43: F10
   0x45,  // 44: F11
-  OSD_OPEN | 0x07,  // 45: F12 (OSD)
+  OSD_OPEN | 0x58,  // 45: F12 (OSD)
   EXT | 0x37, // 46: Print Screen
   NUM_LOCK_TOGGLE,  // 47: Scroll Lock
   0x45,  // 48: Pause (special key handled inside user_io)
   EXT | 0x52, // 49: Insert
   EXT | 0x47, // 4a: Home
   EXT | 0x49, // 4b: Page Up
-  EXT | 0x4b, // 4c: Delete
+  EXT | 0x53, // 4c: Delete
   EXT | 0x4f, // 4d: End
   EXT | 0x51, // 4e: Page Down
   EXT | 0x4d, // 4f: Right Arrow

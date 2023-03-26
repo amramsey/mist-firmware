@@ -57,6 +57,7 @@
 #define UIO_SIO_OUT     0x20  // serial out
 #define UIO_SET_MOD     0x21  // send core variant from metadata (ARC) file
 #define UIO_SET_RTC     0x22  // send real-time-clock data
+#define UIO_SD_ACK      0x23  // send ack for sector read/write
 
 // extended joystick control (32 bit value)
 #define UIO_JOYSTICK0_EXT   0x60
@@ -77,8 +78,22 @@
 
 #define UIO_GET_FEATS   0x80 // get core features (only once after fpga init)
 
-#define FEAT_MENU       0x01 // menu core
-#define FEAT_PCECD      0x02 // call pcecd_poll()
+#define FEAT_MENU       0x0001 // menu core
+#define FEAT_PCECD      0x0002 // call pcecd_poll()
+#define FEAT_QSPI       0x0004 // QSPI connection to FPGA
+#define FEAT_IDE0       0x0030 // enable primary master IDE (0 - off, 1 - ATA - 2 ATAPI CDROM)
+#define FEAT_IDE0_ATA   0x0010
+#define FEAT_IDE0_CDROM 0x0020
+#define FEAT_IDE1       0x00c0 // enable primary slave IDE
+#define FEAT_IDE1_ATA   0x0040
+#define FEAT_IDE1_CDROM 0x0080
+#define FEAT_IDE2       0x0300 // enable secondary master IDE
+#define FEAT_IDE2_ATA   0x0100
+#define FEAT_IDE2_CDROM 0x0200
+#define FEAT_IDE3       0x0c00 // enable secondary slave IDE
+#define FEAT_IDE3_ATA   0x0400
+#define FEAT_IDE3_CDROM 0x0800
+#define FEAT_IDE_MASK   0x0FF0
 
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02
@@ -174,6 +189,7 @@ typedef struct {
 void user_io_reset();
 void user_io_init();
 void user_io_detect_core_type();
+void user_io_init_core();
 unsigned char user_io_core_type();
 uint32_t user_io_get_core_features();
 char minimig_v1();
@@ -190,7 +206,7 @@ char user_io_serial_status(serial_status_t *, uint8_t);
 char user_io_is_mounted(unsigned char index);
 void user_io_file_mount(const unsigned char*, unsigned char);
 char user_io_is_cue_mounted();
-char user_io_cue_mount(const unsigned char*);
+char user_io_cue_mount(const unsigned char*, unsigned char);
 char *user_io_get_core_name();
 void user_io_set_core_mod(char);
 
@@ -213,7 +229,7 @@ void user_io_analog_joystick(unsigned char, char, char, char, char);
 char user_io_osd_is_visible();
 void user_io_send_buttons(char);
 
-void user_io_key_remap(char *);
+char user_io_key_remap(char *, char, int);
 void add_modifiers(uint8_t mod, uint16_t* keys_ps2);
 
 unsigned char user_io_ext_idx(const char*, const char*);

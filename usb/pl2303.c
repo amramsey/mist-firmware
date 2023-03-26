@@ -47,6 +47,10 @@ static uint8_t tx_buf_fill;
 
 static uint8_t adapter_count = 0;
 
+uint8_t get_pl2303s(void) {
+  return adapter_count;
+}
+
 // return true if there's a pl2303 present and if that has
 // its tx buffer full. This will then stop reading data from the 
 // core so it can throttle 
@@ -203,6 +207,7 @@ static uint8_t pl2303_parse_conf0(usb_device_t *dev, uint16_t len) {
 	
 	// Fill in the endpoint info structure
 	info->ep[epidx].epAddr	   = (p->ep_desc.bEndpointAddress & 0x0F);
+	info->ep[epidx].epType     = (p->ep_desc.bmAttributes & EP_TYPE_MSK);
 	info->ep[epidx].maxPktSize = p->ep_desc.wMaxPacketSize[0];
 	info->ep[epidx].epAttribs  = 0;
 	info->ep[epidx].bmNakPower = USB_NAK_NOWAIT;
@@ -246,7 +251,7 @@ static uint8_t pl2303_parse_conf0(usb_device_t *dev, uint16_t len) {
   
   if(len != 0) {
     pl2303_debugf("Config underrun: %d", len);
-    return USB_ERROR_CONFIGURAION_SIZE_MISMATCH;
+    return USB_ERROR_CONFIGURATION_SIZE_MISMATCH;
   }
 
   return 0;
@@ -256,15 +261,15 @@ static uint8_t pl2303_parse_conf0(usb_device_t *dev, uint16_t len) {
 uint8_t tx_test = 0;
 #endif
 
-static uint8_t pl2303_init(usb_device_t *dev) {
+static uint8_t pl2303_init(usb_device_t *dev, usb_device_descriptor_t *dev_desc) {
   usb_pl2303_info_t *info = &(dev->pl2303_info);
   uint8_t i, rcode = 0;
 
   pl2303_debugf("%s(%d)", __FUNCTION__, dev->bAddress);
 
   // reset status
-  info->qNextIrqPollTime = 0;
-  info->qNextBulkPollTime = 0;
+  info->qLastIrqPollTime = 0;
+  info->qLastBulkPollTime = 0;
   info->bPollEnable = false;
 
   // buffer should be empty
@@ -275,25 +280,17 @@ static uint8_t pl2303_init(usb_device_t *dev) {
 #endif
 
   union {
-    usb_device_descriptor_t dev_desc;
     usb_configuration_descriptor_t conf_desc;
     uint8_t raw[0];
   } buf;
 
-  // read full device descriptor 
-  rcode = usb_get_dev_descr( dev, sizeof(usb_device_descriptor_t), &buf.dev_desc );
-  if( rcode ) {
-    pl2303_debugf("failed to get device descriptor");
-    return rcode;
-  }
-
   pl2303_debugf("vid/pid = %x/%x", 
-		buf.dev_desc.idVendor, buf.dev_desc.idProduct);
+    dev_desc->idVendor, dev_desc->idProduct);
 
   // scan through list of supported devices
   for(i=0;(i!=0xff)&&(supported_devices[i][0]!=0);i++) {
-    if((buf.dev_desc.idVendor  == supported_devices[i][0]) &&
-       (buf.dev_desc.idProduct == supported_devices[i][1])) {
+    if((dev_desc->idVendor  == supported_devices[i][0]) &&
+       (dev_desc->idProduct == supported_devices[i][1])) {
       pl2303_debugf("Found supported vid/pid");
       i = 0xfe;  // will be increase by 1 at end of for loop
     }
@@ -304,16 +301,16 @@ static uint8_t pl2303_init(usb_device_t *dev) {
     return USB_DEV_CONFIG_ERROR_DEVICE_NOT_SUPPORTED;
   }
 
-  if(buf.dev_desc.bDeviceClass == 0x02 ) {
+  if(dev_desc->bDeviceClass == 0x02 ) {
     info->type = PL2303_TYPE_0;
     pl2303_debugf("TYPE_0");
-  } else if(buf.dev_desc.bMaxPacketSize0 == 0x40 ) {
+  } else if(dev_desc->bMaxPacketSize0 == 0x40 ) {
     info->type = PL2303_TYPE_HX;
     pl2303_debugf("TYPE_HX");
-  } else if(buf.dev_desc.bDeviceClass == 0x00) {
+  } else if(dev_desc->bDeviceClass == 0x00) {
     info->type = PL2303_TYPE_1;
     pl2303_debugf("TYPE_1");
-  } else if(buf.dev_desc.bDeviceClass == 0xff) {
+  } else if(dev_desc->bDeviceClass == 0xff) {
     info->type = PL2303_TYPE_1;
     pl2303_debugf("TYPE_1");
   }
@@ -386,7 +383,7 @@ static uint8_t pl2303_poll(usb_device_t *dev) {
   
 #if 1 // no need to use the irq channel ...
   // poll interrupt endpoint
-  if (info->qNextIrqPollTime <= timer_get_msec()) {
+  if (timer_check(info->qLastIrqPollTime, info->int_poll_ms)) {
     uint16_t read = info->ep[info->ep_int_idx].maxPktSize;
     uint8_t buf[info->ep[info->ep_int_idx].maxPktSize];
     uint8_t rcode = usb_in_transfer(dev, &(info->ep[info->ep_int_idx]), &read, buf);
@@ -398,12 +395,12 @@ static uint8_t pl2303_poll(usb_device_t *dev) {
       pl2303_debugf("int %d bytes", read);
       hexdump(buf, read, 0);
     }
-    info->qNextIrqPollTime = timer_get_msec() + info->int_poll_ms;
+    info->qLastIrqPollTime = timer_get_msec();
   }
 #endif
 
   // Do TX/RX handling at 100Hz
-  if(info->qNextBulkPollTime <= timer_get_msec()) {
+  if(timer_check(info->qLastBulkPollTime, 10)) {
 
 #ifdef TX_TEST
     if(tx_test < 26) {
@@ -486,8 +483,7 @@ static uint8_t pl2303_poll(usb_device_t *dev) {
       }
     }
 
-    // bulk ep polling at fixed 100Hz
-    info->qNextBulkPollTime = timer_get_msec() + 10;
+    info->qLastBulkPollTime = timer_get_msec();
   }
 }
 

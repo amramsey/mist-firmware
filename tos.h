@@ -3,7 +3,7 @@
 
 #include "fat_compat.h"
 
-// FPGA spi cmommands
+// FPGA spi commands
 #define MIST_INVALID      0x00
 
 // memory interface
@@ -49,7 +49,7 @@
 #define TOS_CONTROL_FDC_WR_PROT_A 0x00000040
 #define TOS_CONTROL_FDC_WR_PROT_B 0x00000080
 #define TOS_CONTROL_VIDEO_COLOR   0x00000100   // input to mfp
-#define TOS_CONTROL_PAL50HZ       0x00000200   // display pal at 50hz (56 hz otherwise)
+#define TOS_CONTROL_PAL50HZ       0x00000200   // display pal at 50Hz (56Hz otherwise)
 
 // up to eight acsi devices can be enabled
 #define TOS_ACSI0_ENABLE          0x00000400
@@ -72,7 +72,8 @@
 #define TOS_CONTROL_STE           0x00800000
 #define TOS_CONTROL_MSTE          0x01000000
 #define TOS_CONTROL_ETHERNET      0x02000000
-                          
+#define TOS_CONTROL_CUBASE        0x40000000
+
 // USB redirection modes
 // (NONE=0, RS232=1, PARALLEL=2, MIDI=3)
 #define TOS_CONTROL_REDIR0        0x04000000
