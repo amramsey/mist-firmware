@@ -27,8 +27,12 @@ typedef struct {
   uint8_t joystick_emu_fixed_index;
   uint8_t joystick_analog_mult;
   uint8_t joystick_autofire_combo;
+  uint8_t joystick_disable_swap;
   uint8_t joystick_dead_range;
   int8_t joystick_analog_offset;
+#ifdef JOY_DB9_MD
+  uint8_t joystick_db9_md;
+#endif
   uint8_t key_menu_as_rgui;
   uint8_t reset_combo;
   uint8_t ypbpr;

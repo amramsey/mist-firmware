@@ -37,6 +37,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "fpga.h"
 #include "scsi.h"
 #include "cue_parser.h"
+#ifdef HAVE_QSPI
+#include "qspi.h"
+#include "user_io.h"
+#endif
 #include "debug.h"
 
 hardfileTYPE  *hardfile[HARDFILES];
@@ -1316,11 +1320,21 @@ static inline void ATA_ReadSectors(unsigned char* tfr, unsigned short sector, un
             while (blocks) {
               FileReadBlockEx(&hdf[unit].idxfile->file, sector_buffer, MIN(blocks, SECTOR_BUFFER_SIZE/512));
               if (!verify) {
+#ifdef HAVE_QSPI
+                if(minimig_v2()) {
+                  qspi_start_write();
+                  qspi_write_block(sector_buffer, 512*MIN(blocks, SECTOR_BUFFER_SIZE/512));
+                  qspi_end();
+                } else {
+#endif
                 EnableFpga();
                 spi8(CMD_IDE_DATA_WR); // write data command
                 spi_n(0x00, 5);
                 spi_write(sector_buffer, 512*MIN(blocks, SECTOR_BUFFER_SIZE/512));
                 DisableFpga();
+#ifdef HAVE_QSPI
+                }
+#endif
               }
               blocks-=MIN(blocks, SECTOR_BUFFER_SIZE/512);
             }
@@ -1349,14 +1363,25 @@ static inline void ATA_ReadSectors(unsigned char* tfr, unsigned short sector, un
           while (blocks) {
             disk_read(fs.pdrv, sector_buffer, lba+hdf[unit].offset, MIN(blocks, SECTOR_BUFFER_SIZE/512));
             if (!verify) {
+#ifdef HAVE_QSPI
+              if(minimig_v2()) {
+                qspi_start_write();
+                qspi_write_block(sector_buffer, 512*MIN(blocks, SECTOR_BUFFER_SIZE/512));
+                qspi_end();
+              } else {
+#else
               EnableFpga();
               spi8(CMD_IDE_DATA_WR); // write data command
               spi_n(0x00, 5);
               spi_write(sector_buffer, 512*MIN(blocks, SECTOR_BUFFER_SIZE/512));
               DisableFpga();
+#endif
+#ifdef HAVE_QSPI
+              }
+#endif
             }
-            blocks-=MIN(blocks, SECTOR_BUFFER_SIZE/512);
             lba+=MIN(blocks, SECTOR_BUFFER_SIZE/512);
+            blocks-=MIN(blocks, SECTOR_BUFFER_SIZE/512);
           }
 #ifndef SD_NO_DIRECT_MODE
         }
@@ -1531,10 +1556,14 @@ void HandleHDD(unsigned char c1, unsigned char c2, unsigned char cs1ena)
       ATA_SetMultipleMode(tfr, unit);
     } else if (tfr[7] == ACMD_READ_SECTORS) {
       ATA_ReadSectors(tfr, sector, cylinder, head, unit, sector_count, false, lbamode, false);
+    } else if (tfr[7] == ACMD_READ_SECTORS1) {
+      ATA_ReadSectors(tfr, sector, cylinder, head, unit, sector_count, false, lbamode, false);
     } else if (tfr[7] == ACMD_READ_MULTIPLE) {
       ATA_ReadSectors(tfr, sector, cylinder, head, unit, sector_count, true, lbamode, false);
     } else if (tfr[7] == ACMD_WRITE_SECTORS) {
-      ATA_WriteSectors(tfr, sector, cylinder, head, unit, sector_count ,false, lbamode);
+      ATA_WriteSectors(tfr, sector, cylinder, head, unit, sector_count, false, lbamode);
+    } else if (tfr[7] == ACMD_WRITE_SECTORS1) {
+      ATA_WriteSectors(tfr, sector, cylinder, head, unit, sector_count, false, lbamode);
     } else if (tfr[7] == ACMD_WRITE_MULTIPLE) {
       ATA_WriteSectors(tfr, sector, cylinder, head, unit, sector_count, true, lbamode);
     } else if (tfr[7] == ACMD_READ_VERIFY_SECTORS) {

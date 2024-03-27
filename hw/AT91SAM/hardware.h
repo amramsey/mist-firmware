@@ -43,6 +43,8 @@
 #define ALTERA_NSTATUS AT91C_PIO_PA7
 #define ALTERA_DCLK    AT91C_PIO_PA15
 
+#define ALTERA_START_CONFIG
+#define ALTERA_STOP_CONFIG
 #define ALTERA_NCONFIG_SET   FPGA_SODR = ALTERA_NCONFIG
 #define ALTERA_NCONFIG_RESET FPGA_CODR = ALTERA_NCONFIG
 #define ALTERA_DCLK_SET      FPGA_SODR = ALTERA_DCLK
@@ -111,8 +113,6 @@ unsigned long GetTimer(unsigned long offset);
 unsigned long CheckTimer(unsigned long t);
 void WaitTimer(unsigned long time);
 
-void TIMER_wait(unsigned long ms);
-
 void USART_Poll(void);
 
 void inline MCUReset() {*AT91C_RSTC_RCR = 0xA5 << 24 | AT91C_RSTC_PERRST | AT91C_RSTC_PROCRST | AT91C_RSTC_EXTRST;}
@@ -131,7 +131,7 @@ unsigned char MenuButton();
 unsigned char UserButton();
 
 void InitDB9();
-char GetDB9(char index, unsigned char *joy_map);
+char GetDB9(char index, uint16_t *joy_map);
 
 char GetRTC(unsigned char *d);
 char SetRTC(unsigned char *d);

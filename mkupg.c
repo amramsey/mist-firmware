@@ -2,6 +2,10 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifndef FW_ID
+#define FW_ID "MNMGUPG"
+#endif
+
 typedef struct
 {
     unsigned int flags;
@@ -97,6 +101,8 @@ int main(int argc, char **argv) {
   unsigned char *bin = malloc(size);
   if(fread(bin, 1, size, inf) != size) {
     printf("Read error on %s\n", argv[1]);
+    free(bin);
+    fclose(inf);
     return -1;
   }
   fclose(inf);
@@ -108,7 +114,7 @@ int main(int argc, char **argv) {
   memset(&upgrade, 0, sizeof(upgrade));
   strcpy(upgrade.version,"ATH");
   strncpy(upgrade.version+3,argv[3],6);
-  strcpy(upgrade.id, "MNMGUPG");
+  strcpy(upgrade.id, FW_ID);
   upgrade.rom.size = size;
   upgrade.rom.crc = ~CalculateCRC32(-1, bin, size);
   upgrade.rom.size = size;
@@ -129,6 +135,7 @@ int main(int argc, char **argv) {
   fwrite(&upgrade, 1, sizeof(UPGRADE), outf);
   fwrite(bin, 1, size, outf);
 
+  free(bin);
   fclose(outf);
 
   return 0;

@@ -281,14 +281,14 @@ void Timer_Init(void) {
 }
 
 // 12 bits accuracy at 1ms = 4096 ms 
-unsigned long GetTimer(unsigned long offset)
+RAMFUNC unsigned long GetTimer(unsigned long offset)
 {
     unsigned long systimer = (*AT91C_PITC_PIIR & AT91C_PITC_PICNT);
     systimer += offset << 20;
     return (systimer); // valid bits [31:20]
 }
 
-unsigned long CheckTimer(unsigned long time)
+RAMFUNC unsigned long CheckTimer(unsigned long time)
 {
     unsigned long systimer = (*AT91C_PITC_PIIR & AT91C_PITC_PICNT);
     time -= systimer;
@@ -299,10 +299,6 @@ void WaitTimer(unsigned long time)
 {
     time = GetTimer(time);
     while (!CheckTimer(time));
-}
-
-void TIMER_wait(unsigned long ms) {
-  WaitTimer(ms);
 }
 
 inline char mmc_inserted() {
@@ -401,7 +397,7 @@ unsigned char UserButton() {
 void InitDB9() {}
 
 // poll db9 joysticks
-char GetDB9(char index, unsigned char *joy_map) {
+char GetDB9(char index, uint16_t *joy_map) {
   static int joy0_state = JOY0;
   static int joy1_state = JOY1;
   if (!index) {

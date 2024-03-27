@@ -38,6 +38,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "settings.h"
 #include "usb/joymapping.h"
 
+#ifndef DEFAULT_CORE_NAME
+#define DEFAULT_CORE_NAME "CORE.RBF"
+#endif
+
 uint8_t rstval = 0;
 
 #define CMD_HDRID 0xAACA
@@ -261,13 +265,13 @@ unsigned char ConfigureFpga(const char *name)
     ALTERA_DATA0_SET;
 
     if(!name)
-      name = "CORE.RBF";
+      name = DEFAULT_CORE_NAME;
 
     // open bitstream file
     if (f_open(&file, name, FA_READ) != FR_OK)
     {
         iprintf("No FPGA configuration file found!\r");
-        FatalError(4);
+        FatalError(ERROR_BITSTREAM_OPEN);
     }
 
     iprintf("FPGA bitstream file %s opened, file size = %llu\r", name, f_size(&file));
@@ -276,6 +280,7 @@ unsigned char ConfigureFpga(const char *name)
     // send all bytes to FPGA in loop
     ptr = sector_buffer;
 
+    ALTERA_START_CONFIG
     /* Drive a transition of 0 to 1 to NCONFIG to indicate start of configuration */
     for(i=0;i<10;i++)
       ALTERA_NCONFIG_RESET;  // must be low for at least 500ns
@@ -289,9 +294,10 @@ unsigned char ConfigureFpga(const char *name)
     {
         if (--i == 0)
         {
+            ALTERA_STOP_CONFIG
             iprintf("FPGA NSTATUS is NOT high!\r");
             f_close(&file);
-            FatalError(3);
+            FatalError(ERROR_UPDATE_INIT_FAILED);
         }
     }
 
@@ -316,7 +322,7 @@ unsigned char ConfigureFpga(const char *name)
 
             if (f_read(&file, sector_buffer, SECTOR_BUFFER_SIZE, &br) != FR_OK) {
                 f_close(&file);
-                return(0);
+                FatalError(ERROR_READ_BITSTREAM_FAILED);
             }
 
             ptr = sector_buffer;
@@ -332,12 +338,15 @@ unsigned char ConfigureFpga(const char *name)
         /* Check for error through NSTATUS for every 10KB programmed and the last byte */
         if ( !(i % 10240) || (i == f_size(&file) - 1) ) {
             if ( !ALTERA_NSTATUS_STATE ) {
+                ALTERA_STOP_CONFIG
+
                 iprintf("FPGA NSTATUS is NOT high!\r");
                 f_close(&file);
-                FatalError(5);
+                FatalError(ERROR_UPDATE_PROGRESS_FAILED);
             }
         }
     }
+    ALTERA_STOP_CONFIG
 
     f_close(&file);
 
@@ -348,7 +357,7 @@ unsigned char ConfigureFpga(const char *name)
     // check if DONE is high
     if (!ALTERA_DONE_STATE) {
       iprintf("FPGA Configuration done but contains error... CONF_DONE is LOW\r");
-      FatalError(5);
+      FatalError(ERROR_UPDATE_FAILED);
     }
 
     
@@ -374,7 +383,7 @@ unsigned char ConfigureFpga(const char *name)
 
       iprintf("FPGA Initialization finish but contains error: NSTATUS is %s and CONF_DONE is %s.\r", 
              ALTERA_NSTATUS_STATE?"HIGH":"LOW", ALTERA_DONE_STATE?"HIGH":"LOW" );
-      FatalError(5);
+      FatalError(ERROR_UPDATE_FAILED);
     }
 
     return 1;
@@ -923,8 +932,9 @@ void fpga_init(const char *name) {
       time = GetRTTC() - time;
       iprintf("FPGA configured in %lu ms\r", time);
     } else {
+      // should not reach this code
       iprintf("FPGA configuration failed\r");
-      FatalError(8); // 3
+      FatalError(ERROR_UPDATE_FAILED);
     }
   }
 
@@ -934,7 +944,7 @@ void fpga_init(const char *name) {
     EnableIO();
     ct = SPI(0xff);
     DisableIO();
-    SPI(0xff);         // for old minimig core
+    SPI_MINIMIGV1_HACK
   } while( ((ct == 0) || (ct == 0xff)) && !CheckTimer(time));
 
   iprintf("ident = %x\n", ct);
@@ -961,6 +971,7 @@ void fpga_init(const char *name) {
       minimig_ver_minion = SPI(0xff);
       DisableOsd();
       SPIN(); SPIN(); SPIN(); SPIN();
+      EnableOsd();
       SPI(OSD_CMD_RST);
       rstval = (SPI_RST_USR | SPI_RST_CPU | SPI_CPU_HLT);
       SPI(rstval);

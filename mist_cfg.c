@@ -61,6 +61,7 @@ mist_cfg_t mist_cfg = {
   .joystick_analog_mult = 128,
   .joystick_analog_offset = 0,
   .joystick_autofire_combo = 0,
+  .joystick_disable_swap = 0,
   .joystick_dead_range = 4,
   .key_menu_as_rgui = 0,
   .keyrah_mode = 0,
@@ -109,9 +110,13 @@ const ini_var_t mist_ini_vars[] = {
   {"JOYSTICK_ANALOG_MULTIPLIER", (void*)(&(mist_cfg.joystick_analog_mult)), UINT8, 1, 128, 1},
   {"JOYSTICK_ANALOG_OFFSET", (void*)(&(mist_cfg.joystick_analog_offset)), INT8, -127, 127, 1},
   {"JOYSTICK_AUTOFIRE_COMBO", (void*)(&(mist_cfg.joystick_autofire_combo)), INT8, 0, 2, 1},
+  {"JOYSTICK_DISABLE_SWAP", (void*)(&(mist_cfg.joystick_disable_swap)), INT8, 0, 1, 1},
   {"JOYSTICK_DEAD_RANGE", (void*)(&(mist_cfg.joystick_dead_range)), UINT8, 0, 255, 1},
   {"KEY_MENU_AS_RGUI", (void*)(&(mist_cfg.key_menu_as_rgui)), UINT8, 0, 1, 1},
   {"SDRAM64", (void*)(&(mist_cfg.sdram64)), UINT8, 0, 1, 1},
+#ifdef JOY_DB9_MD
+  {"JOYSTICK_DB9_MD", (void*)(&(mist_cfg.joystick_db9_md)), UINT8, 0, 2, 1},
+#endif
 #ifndef INI_PARSER_TEST
   {"KEY_REMAP", (void*)user_io_key_remap, CUSTOM_HANDLER, 0, 0, 1},
   {"HID_BUTTON_REMAP", (void*)hid_joystick_button_remap, CUSTOM_HANDLER, 0, 0, 1},

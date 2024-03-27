@@ -60,6 +60,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "cdc_control.h"
 #include "storage_control.h"
 #include "FatFs/diskio.h"
+#ifdef HAVE_QSPI
+#include "qspi.h"
+#endif
+#include "eth.h"
 
 #ifndef _WANT_IO_LONG_LONG
 #error "newlib lacks support of long long type in IO functions. Please use a toolchain that was compiled with option --enable-newlib-io-long-long."
@@ -145,6 +149,9 @@ int main(void)
     iprintf("Version %s\r\r", version+5);
 
     spi_init();
+#ifdef HAVE_QSPI
+    qspi_init();
+#endif
 
     if(MMC_Init()) mmc_ok = 1;
     else           spi_fast();
@@ -161,7 +168,7 @@ int main(void)
     if(USB_BOOT_VAR == USB_BOOT_VALUE)
       if (!GetUSBStorageDevices()) {
         if(!mmc_ok)
-          FatalError(1);
+          FatalError(ERROR_FILE_NOT_FOUND);
       } else
         fat_switch_to_usb();  // redirect file io to usb
     else {
@@ -169,11 +176,11 @@ int main(void)
       if(!mmc_ok) {
 #ifdef USB_STORAGE
         if(!GetUSBStorageDevices())
-          FatalError(1);
+          FatalError(ERROR_FILE_NOT_FOUND);
 
         fat_switch_to_usb();  // redirect file io to usb
 #else
-        FatalError(1);
+        FatalError(ERROR_FILE_NOT_FOUND);
 #endif
       }
 #ifdef USB_STORAGE
@@ -181,10 +188,12 @@ int main(void)
 #endif
 
     if (!FindDrive())
-        FatalError(2);
+        FatalError(ERROR_INVALID_DATA);
 
     disk_ioctl(fs.pdrv, GET_SECTOR_COUNT, &storage_size);
     storage_size >>= 11;
+
+    eth_init();
 
     ChangeDirectoryName("/");
 
@@ -222,6 +231,8 @@ int main(void)
     usb_dev_open();
 
     while (1) {
+      mmc_ok = fat_medium_present();
+
       cdc_control_poll();
       storage_control_poll();
 
@@ -229,23 +240,25 @@ int main(void)
 
       usb_poll();
 
+      eth_poll();
+
       // MIST (atari) core supports the same UI as Minimig
       if((user_io_core_type() == CORE_TYPE_MIST) ||
          (user_io_core_type() == CORE_TYPE_MIST2)) {
-	if(!fat_medium_present()) 
-	  tos_eject_all();
+         if(!mmc_ok)
+             tos_eject_all();
 
-	HandleUI();
+         HandleUI();
       }
 
       // call original minimig handlers if minimig core is found
       if((user_io_core_type() == CORE_TYPE_MINIMIG) ||
-	 (user_io_core_type() == CORE_TYPE_MINIMIG2)) {
-	if(!fat_medium_present()) 
-	  EjectAllFloppies();
+        (user_io_core_type() == CORE_TYPE_MINIMIG2)) {
+        if(!mmc_ok)
+            EjectAllFloppies();
 
-	HandleFpga();
-	HandleUI();
+        HandleFpga();
+        HandleUI();
       }
 
       // 8 bit cores can also have a ui if a valid config string can be read from it

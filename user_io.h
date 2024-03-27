@@ -7,6 +7,7 @@
 #define USER_IO_H
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include "fat_compat.h"
 
 #define UIO_STATUS      0x00
@@ -58,6 +59,11 @@
 #define UIO_SET_MOD     0x21  // send core variant from metadata (ARC) file
 #define UIO_SET_RTC     0x22  // send real-time-clock data
 #define UIO_SD_ACK      0x23  // send ack for sector read/write
+#define UIO_GET_STR_EXT 0x24  // get config string from dedicated position
+
+// I2c bridge
+#define UIO_I2C_SEND    0x30  // start i2c transaction on the FPGA side
+#define UIO_I2C_GET     0x31  // get i2c status and result from the FPGA
 
 // extended joystick control (32 bit value)
 #define UIO_JOYSTICK0_EXT   0x60
@@ -80,7 +86,8 @@
 
 #define FEAT_MENU       0x0001 // menu core
 #define FEAT_PCECD      0x0002 // call pcecd_poll()
-#define FEAT_QSPI       0x0004 // QSPI connection to FPGA
+#define FEAT_QSPI       0x0004 // QSPI connection to FPGA@24MHz
+#define FEAT_NEOCD      0x0008 // call neocd_poll()
 #define FEAT_IDE0       0x0030 // enable primary master IDE (0 - off, 1 - ATA - 2 ATAPI CDROM)
 #define FEAT_IDE0_ATA   0x0010
 #define FEAT_IDE0_CDROM 0x0020
@@ -94,6 +101,10 @@
 #define FEAT_IDE3_ATA   0x0400
 #define FEAT_IDE3_CDROM 0x0800
 #define FEAT_IDE_MASK   0x0FF0
+#define FEAT_PS2REP     0x1000 // typematic repeat by default
+#define FEAT_BIGOSD     0x2000 // 16 line tall OSD
+#define FEAT_HDMI       0x4000 // HDMI output
+#define FEAT_PSX        0x8000 // PSX-specific CD image handling
 
 #define JOY_RIGHT       0x01
 #define JOY_LEFT        0x02
@@ -198,7 +209,7 @@ char user_io_is_8bit_with_config_string();
 void user_io_poll();
 void user_io_osd_key_enable(char);
 void user_io_serial_tx(char *, uint16_t);
-char *user_io_8bit_get_string(char);
+char *user_io_8bit_get_string(unsigned char);
 unsigned long long user_io_8bit_set_status(unsigned long long, unsigned long long);
 void user_io_sd_set_config(void);
 char user_io_dip_switch1(void);
@@ -209,6 +220,7 @@ char user_io_is_cue_mounted();
 char user_io_cue_mount(const unsigned char*, unsigned char);
 char *user_io_get_core_name();
 void user_io_set_core_mod(char);
+void user_io_sd_ack(char drive_index);
 
 // io controllers interface for FPGA ethernet emulation using usb ethernet
 // devices attached to the io controller (ethernec emulation)
@@ -228,6 +240,8 @@ void user_io_digital_joystick_ext(unsigned char, uint32_t);
 void user_io_analog_joystick(unsigned char, char, char, char, char);
 char user_io_osd_is_visible();
 void user_io_send_buttons(char);
+char user_io_i2c_write(unsigned char addr, unsigned char subaddr, unsigned char data);
+char user_io_i2c_read(unsigned char addr, unsigned char subaddr, unsigned char *data);
 
 char user_io_key_remap(char *, char, int);
 void add_modifiers(uint8_t mod, uint16_t* keys_ps2);
@@ -235,5 +249,7 @@ void add_modifiers(uint8_t mod, uint16_t* keys_ps2);
 unsigned char user_io_ext_idx(const char*, const char*);
 
 void user_io_change_into_core_dir(void);
+
+bool user_io_hdmi_detected();
 
 #endif // USER_IO_H

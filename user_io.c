@@ -10,6 +10,8 @@
 #include "data_io.h"
 #include "archie.h"
 #include "pcecd.h"
+#include "neocd.h"
+#include "psx.h"
 #include "hdd.h"
 #include "cdc_control.h"
 #include "usb.h"
@@ -30,6 +32,9 @@
 #include "usb/joystick.h"
 #include "FatFs/diskio.h"
 #include "menu.h"
+#ifdef HAVE_HDMI
+#include "it6613/HDMI_TX.h"
+#endif
 
 // up to 16 key can be remapped
 #define MAX_REMAP  16
@@ -38,7 +43,7 @@ unsigned char key_remap_table[MAX_REMAP][2];
 #define BREAK  0x8000
 
 static char umounted; // 1st image is file or direct SD?
-static char buffer[512];
+static char cache_buffer[1024];
 static uint8_t buffer_drive_index = 0;
 static uint32_t buffer_lba = 0xffffffff;
 
@@ -117,6 +122,19 @@ static char autofire_joy;
 // ATA drives
 static hardfileTYPE  hardfiles[4];
 
+static uint8_t i2c_flags;
+
+#ifdef HAVE_HDMI
+static unsigned long hdmi_timer;
+static bool hdmi_detected = 0;
+static uint8_t hdmi_hiclk = 0;
+#define HDMI_FREQ 1000
+#endif
+
+#define CONF_TBL_MAX 64
+static uint16_t conf_idx[CONF_TBL_MAX];
+static int conf_items = 0;
+
 char user_io_osd_is_visible() {
 	return osd_is_visible;
 }
@@ -145,6 +163,8 @@ void user_io_reset() {
 	ps2_typematic_rate = 0x80;
 	autofire = 0;
 	autofire_joy = -1;
+	conf_items = 0;
+	conf_idx[0] = 0;
 }
 
 void user_io_init() {
@@ -258,6 +278,7 @@ static void user_io_read_core_features() {
 		core_features = (core_features<<8) | spi_in();
 	}
 	DisableIO();
+	if (core_features & FEAT_PS2REP) ps2_typematic_rate = 0x08;
 }
 
 void user_io_detect_core_type() {
@@ -424,9 +445,20 @@ void user_io_init_core() {
 		if (core_features & FEAT_IDE_MASK)
 			SendHDFCfg();
 
+
 		// release reset
 		user_io_8bit_set_status(0, UIO_STATUS_RESET);
 	}
+
+#ifdef HAVE_HDMI
+	hdmi_detected = false;
+	hdmi_hiclk = 0;
+	if ((core_type == CORE_TYPE_8BIT && core_features & FEAT_HDMI) || core_type == CORE_TYPE_MIST2 || core_type == CORE_TYPE_MINIMIG2 || core_type == CORE_TYPE_ARCHIE) {
+		hdmi_detected = HDMITX_Init();
+		if (hdmi_detected) HDMITX_ChangeVideoTiming(1);
+	}
+#endif
+
 }
 
 static unsigned short usb2amiga( unsigned  char k ) {
@@ -471,7 +503,7 @@ void user_io_digital_joystick(unsigned char joystick, unsigned char map) {
 	if(joystick > 5)
 		return;
 	// if osd is open, control it via joystick
-	if(osd_is_visible)
+	if(osd_is_visible && map)
 		return;
 
 	//iprintf("j%d: %x\n", joystick, map);
@@ -491,7 +523,7 @@ void user_io_digital_joystick(unsigned char joystick, unsigned char map) {
 void user_io_digital_joystick_ext(unsigned char joystick, uint32_t map) {
 	// "only" 6 joysticks are supported
 	if(joystick > 5) return;
-	if(osd_is_visible) return;
+	if(osd_is_visible && map) return;
 	//iprintf("ext j%d: %x\n", joystick, map);
 	spi_uio_cmd32(UIO_JOYSTICK0_EXT + joystick, 0x000fffff & map);
 	if (autofire && (map & 0x30)) {
@@ -512,7 +544,7 @@ static char dig2ana(char min, char max) {
 	return 0;
 }
 
-void user_io_joystick(unsigned char joystick, unsigned char map) {
+void user_io_joystick(unsigned char joystick, uint16_t map) {
   // digital joysticks also send analog signals
 	user_io_digital_joystick(joystick, map);
 	user_io_digital_joystick_ext(joystick, map);
@@ -603,21 +635,26 @@ void user_io_sd_set_config(void) {
 	//  hexdump(data, sizeof(data), 0);
 }
 
-static void user_io_sd_ack(char drive_index) {
+void user_io_sd_ack(char drive_index) {
 	spi_uio_cmd_cont(UIO_SD_ACK);
 	spi8(drive_index);
 	DisableIO();
 }
 
 // read 8+32 bit sd card status word from FPGA
-uint8_t user_io_sd_get_status(uint32_t *lba, uint8_t *drive_index) {
+uint8_t user_io_sd_get_status(uint32_t *lba, uint8_t *drive_index, uint8_t *blksz) {
 	uint32_t s;
 	uint8_t c; 
 
 	*drive_index = 0;
+	*blksz = 0;
 	spi_uio_cmd_cont(UIO_GET_SDSTAT);
 	c = spi_in();
-	if ((c & 0xf0) == 0x60) *drive_index = spi_in() & 0x03;
+	if ((c & 0xf0) == 0x60) {
+		uint8_t tmp = spi_in();
+		*drive_index = tmp & 0x03;
+		*blksz = (tmp >> 4) & 0x01;
+	}
 	s = spi_in();
 	s = (s<<8) | spi_in();
 	s = (s<<8) | spi_in();
@@ -664,7 +701,8 @@ void user_io_eth_receive_tx_frame(uint8_t *d, uint16_t len) {
 // write ethernet frame to FPGAs rx buffer
 void user_io_eth_send_rx_frame(uint8_t *s, uint16_t len) {
 	spi_uio_cmd_cont(UIO_ETH_FRM_OUT);
-	spi_write(s, len);
+	while(len--) SPI(*s++);
+	//spi_write(s, len);
 	spi8(0);     // one additional byte to allow fpga to store the previous one
 	DisableIO();
 }
@@ -757,7 +795,9 @@ char user_io_cue_mount(const unsigned char *name, unsigned char index) {
 	if (name) {
 		res = cue_parse(name, &sd_image[index]);
 	}
-
+#ifdef HAVE_PSX
+	if (core_features & FEAT_PSX) psx_mount_cd(name);
+#endif
 	// send mounted image size first then notify about mounting
 	EnableIO();
 	SPI(UIO_SET_SDINFO);
@@ -828,28 +868,60 @@ void user_io_file_mount(const unsigned char *name, unsigned char index) {
 
 // 8 bit cores have a config string telling the firmware how
 // to treat it
-char *user_io_8bit_get_string(char index) {
+
+char *user_io_8bit_get_string(unsigned char index) {
 	unsigned char i, lidx = 0, j = 0, d = 0, arc = 0;
 	int arc_ptr = 0;
 	char dip[3];
 	static char buffer[128+1];  // max 128 bytes per config item
+	uint16_t start_chr;
 
 	// clear buffer
 	buffer[0] = 0;
 
-	spi_uio_cmd_cont(UIO_GET_STRING);
-	i = spi_in();
-	// the first char returned will be 0xff if the core doesn't support
-	// config strings. atari 800 returns 0xa4 which is the status byte
-	if((i == 0xff) || (i == 0xa4)) {
+	// use the config index table to get where to start
+	// conf_idx stores the starting position of every 4th item
+	// if the index is in a DIP setting, it has 0
+	uint16_t pos = 0, lastpos = 0;
+
+	i = index>>2;
+	while (i > 0 && (i > conf_items || conf_idx[i] == 0)) i--;
+	pos = lastpos = conf_idx[i];
+	lidx = i<<2;
+
+	//iprintf("index=%d cached pos=%d lidx=%d\n", index, pos, lidx);
+
+	spi_uio_cmd_cont(UIO_GET_STR_EXT);
+	i = SPI(pos & 0xff);
+	if (i == 0xaa) {
+		SPI(pos >> 8);
+		i = spi_in(); // dummy byte to prepare to apply the offset in the core
+		i = spi_in();
+	} else {
 		DisableIO();
-		return NULL;
+		lidx = 0;
+		pos = lastpos = 0;
+		//iprintf("UIO_GET_STRING_EXT not supported\n");
+
+		spi_uio_cmd_cont(UIO_GET_STRING);
+		i = spi_in();
+		// the first char returned will be 0xff if the core doesn't support
+		// config strings. atari 800 returns 0xa4 which is the status byte
+		if((i == 0xff) || (i == 0xa4)) {
+			DisableIO();
+			return NULL;
+		}
 	}
 
 	//  iprintf("String: ");
 
 	while ((i != 0) && (i!=0xff) && (j<sizeof(buffer))) {
 		if(i == ';') {
+			if((lidx & 0x03) == 0 && (lidx >> 2) < CONF_TBL_MAX) {
+				conf_idx[lidx >> 2] = arc ? 0 : lastpos;
+				if (conf_items < (lidx >> 2)) conf_items = (lidx >> 2);
+			}
+			lastpos = pos+1;
 			if(!arc && d==3 && !strncmp(dip, "DIP", 3)) {
 				// found "DIP", continue with config snippet from ARC
 				if(lidx == index) {
@@ -859,7 +931,10 @@ char *user_io_8bit_get_string(char index) {
 				}
 				arc = 1;
 			} else {
-				if(lidx == index) buffer[j++] = 0;
+				if(lidx == index) {
+					buffer[j++] = 0;
+					break;
+				}
 				lidx++;
 			}
 			d = 0;
@@ -875,8 +950,10 @@ char *user_io_8bit_get_string(char index) {
 			i = arc_get_conf()[arc_ptr++];
 			if (!i) arc = 0;
 		}
-		if (!arc)
+		if (!arc) {
 			i = spi_in();
+			pos++;
+		}
 	}
 
 	DisableIO();
@@ -1163,7 +1240,7 @@ void user_io_poll() {
 	EnableIO();
 	ct = SPI(0xff);
 	DisableIO();
-	SPI(0xff);      // needed for old minimig core
+	SPI_MINIMIGV1_HACK
 
 	if((ct&0xef) == core_type)
 		ct_cnt = 0;        // same core type, everything is fine
@@ -1176,7 +1253,7 @@ void user_io_poll() {
 				EnableIO();
 				ct = SPI(0xff);
 				DisableIO();
-				SPI(0xff);      // needed for old minimig core
+				SPI_MINIMIGV1_HACK
 			}
 
 			// reset io controller to cope with new core
@@ -1251,7 +1328,7 @@ void user_io_poll() {
 	}
 
 	// poll db9 joysticks
-	unsigned char joy_map = 0;
+	uint16_t joy_map = 0;
 
 	if(GetDB9(0, &joy_map)) {
 
@@ -1260,6 +1337,7 @@ void user_io_poll() {
 		uint8_t idx = joystick_renumber(0);
 		if (!user_io_osd_is_visible()) user_io_joystick(idx, joy_map);
 		StateJoySet(joy_map, mist_cfg.joystick_db9_fixed_index ? idx : joystick_count()); // send to OSD
+		StateJoySetExtra(joy_map >> 8, mist_cfg.joystick_db9_fixed_index ? idx : joystick_count()); // send to OSD
 		virtual_joystick_keyboard(joy_map);
 	}
 	if(GetDB9(1, &joy_map)) {
@@ -1269,6 +1347,7 @@ void user_io_poll() {
 		uint8_t idx = joystick_renumber(1);
 		if (!user_io_osd_is_visible()) user_io_joystick(idx, joy_map);
 		StateJoySet(joy_map, mist_cfg.joystick_db9_fixed_index ? idx : joystick_count() + 1); // send to OSD
+		StateJoySetExtra(joy_map >> 8, mist_cfg.joystick_db9_fixed_index ? idx : joystick_count() + 1); // send to OSD
 		virtual_joystick_keyboard(joy_map);
 	}
 
@@ -1355,14 +1434,14 @@ void user_io_poll() {
 						spi_uio_cmd_cont(UIO_MOUSE);
 						spi8(x);
 						spi8(y);
-						spi8(mouse_flags[idx] & 0x03);
+						spi8(mouse_flags[idx] & 0x07);
 						DisableIO();
 					}
 
 					spi_uio_cmd_cont(UIO_MOUSE0_EXT + idx);
 					spi8(x);
 					spi8(y);
-					spi8(mouse_flags[idx] & 0x03);
+					spi8(mouse_flags[idx] & 0x07);
 					spi8(z);
 					DisableIO();
 
@@ -1411,6 +1490,8 @@ void user_io_poll() {
 
 	if((core_type == CORE_TYPE_8BIT) && (!strcmp(user_io_get_core_name(), "TGFX16") || (core_features & FEAT_PCECD)))
 		pcecd_poll();
+	if((core_type == CORE_TYPE_8BIT) && (core_features & FEAT_NEOCD))
+		neocd_poll();
 
 	// sd card emulation
 	if((core_type == CORE_TYPE_8BIT) ||
@@ -1419,7 +1500,8 @@ void user_io_poll() {
 	{
 		uint32_t lba;
 		uint8_t drive_index;
-		uint8_t c = user_io_sd_get_status(&lba, &drive_index);
+		uint8_t blksz;
+		uint8_t c = user_io_sd_get_status(&lba, &drive_index, &blksz);
 
 		// valid sd commands start with "5x" (old API), or "6x" (new API)
 		// to avoid problems with cores that don't implement this command
@@ -1468,10 +1550,8 @@ void user_io_poll() {
 				// only write if the inserted card is not sdhc or
 				// if the core uses sdhc
 				if((!MMC_IsSDHC()) || (c & 0x04)) {
-					uint8_t wr_buf[512];
-
 					if(user_io_dip_switch1())
-						iprintf("SD WR (%d) %d\n", drive_index, lba);
+						iprintf("SD WR (%d) %d/%d\n", drive_index, lba, 512<<blksz);
 
 					// if we write the sector stored in the read buffer, then
 					// invalidate the cache
@@ -1481,7 +1561,7 @@ void user_io_poll() {
 					user_io_sd_ack(drive_index);
 					// Fetch sector data from FPGA ...
 					spi_uio_cmd_cont(UIO_SECTOR_WR);
-					spi_block_read(wr_buf);
+					spi_read(sector_buffer, 512<<blksz);
 					DisableIO();
 
 					// ... and write it to disk
@@ -1489,14 +1569,14 @@ void user_io_poll() {
 
 #if 1
 					if(sd_image[sd_index(drive_index)].valid) {
-						if(((f_size(&sd_image[sd_index(drive_index)].file)-1) >> 9) >= lba) {
-							IDXSeek(&sd_image[sd_index(drive_index)], lba);
-							IDXWrite(&sd_image[sd_index(drive_index)], wr_buf);
+						if(((f_size(&sd_image[sd_index(drive_index)].file)-1) >> (9+blksz)) >= lba) {
+							IDXSeek(&sd_image[sd_index(drive_index)], (lba<<blksz));
+							IDXWrite(&sd_image[sd_index(drive_index)], sector_buffer, blksz);
 						}
 					} else if (!drive_index && !umounted)
-						disk_write(fs.pdrv, wr_buf, lba, 1);
+						disk_write(fs.pdrv, sector_buffer, lba, 1<<blksz);
 #else
-					hexdump(wr_buf, 512, 0);
+					hexdump(sector_buffer, 32, 0);
 #endif
 
 					DISKLED_OFF;
@@ -1507,37 +1587,41 @@ void user_io_poll() {
 			if((c & 0x03) == 0x01) {
 
 				if(user_io_dip_switch1())
-					iprintf("SD RD (%d) %d\n", drive_index, lba);
+					iprintf("SD RD (%d) %d/%d\n", drive_index, lba, 512<<blksz);
 
 				// invalidate cache if it stores data from another drive
 				if (drive_index != buffer_drive_index)
 					buffer_lba = 0xffffffff;
 
+#ifdef HAVE_PSX
+				if ((core_features & FEAT_PSX) && drive_index == 1) {
+					psx_read_cd(drive_index, lba);
+				} else {
+#endif
 				// are we using a file as the sd card image?
 				// (C64 floppy does that ...)
 				if(buffer_lba != lba) {
 					DISKLED_ON;
 					if(sd_image[sd_index(drive_index)].valid) {
-						if(((f_size(&sd_image[sd_index(drive_index)].file)-1) >> 9) >= lba) {
-							IDXSeek(&sd_image[sd_index(drive_index)], lba);
-							IDXRead(&sd_image[sd_index(drive_index)], buffer);
+						if(((f_size(&sd_image[sd_index(drive_index)].file)-1) >> (9+blksz)) >= lba) {
+							IDXSeek(&sd_image[sd_index(drive_index)], lba<<blksz);
+							IDXRead(&sd_image[sd_index(drive_index)], cache_buffer, blksz);
 						}
 					} else if (!drive_index && !umounted) {
 						// sector read
 						// read sector from sd card if it is not already present in
 						// the buffer
-						disk_read(fs.pdrv, buffer, lba, 1);
+						disk_read(fs.pdrv, cache_buffer, lba, 1<<blksz);
 					}
 					buffer_lba = lba;
 					DISKLED_OFF;
 				}
-
 				if(buffer_lba == lba) {
-					// hexdump(buffer, 32, 0);
+					// hexdump(cache_buffer, 512<<blksz, 0);
 					user_io_sd_ack(drive_index);
 					// data is now stored in buffer. send it to fpga
 					spi_uio_cmd_cont(UIO_SECTOR_RD);
-					spi_block_write(buffer);
+					spi_write(cache_buffer, 512<<blksz);
 					DisableIO();
 
 					// the end of this transfer acknowledges the FPGA internal
@@ -1549,20 +1633,23 @@ void user_io_poll() {
 				DISKLED_ON;
 				if(sd_image[sd_index(drive_index)].valid) {
 					// but check if it would overrun on the file
-					if(((f_size(&sd_image[sd_index(drive_index)].file)-1) >> 9) > lba) {
-						IDXSeek(&sd_image[sd_index(drive_index)], lba+1);
-						IDXRead(&sd_image[sd_index(drive_index)], buffer);
+					if(((f_size(&sd_image[sd_index(drive_index)].file)-1) >> (9+blksz)) > lba) {
+						IDXSeek(&sd_image[sd_index(drive_index)], (lba+1)<<blksz);
+						IDXRead(&sd_image[sd_index(drive_index)], cache_buffer, blksz);
 						buffer_lba = lba + 1;
 					}
 				} else {
 					// sector read
 					// read sector from sd card if it is not already present in
 					// the buffer
-					disk_read(fs.pdrv, buffer, lba+1, 1);
+					disk_read(fs.pdrv, cache_buffer, lba+1, 1<<blksz);
 					buffer_lba = lba+1;
 				}
 				buffer_drive_index = drive_index;
 				DISKLED_OFF;
+#ifdef HAVE_PSX
+				}
+#endif
 			}
 		}
 	}
@@ -1757,6 +1844,20 @@ void user_io_poll() {
 		OsdDisableMenuButton(0);
 		ypbpr_toggle = 0;
 	}
+
+#ifdef HAVE_HDMI
+	if (hdmi_detected) {
+		if(CheckTimer(hdmi_timer)) {
+			hdmi_timer = GetTimer(HDMI_FREQ);
+			HDMITX_DevLoopProc();
+			if ((i2c_flags & 1) != hdmi_hiclk) {
+				hdmi_hiclk = i2c_flags & 1;
+				if (hdmi_detected) HDMITX_ChangeVideoTiming(hdmi_hiclk ? 16 : 1);
+			}
+		}
+	}
+#endif
+
 }
 
 char user_io_dip_switch1() {
@@ -1838,7 +1939,7 @@ void user_io_mouse(unsigned char idx, unsigned char b, char x, char y, char z) {
 		mouse_pos[idx][X] += x;
 		mouse_pos[idx][Y] += y;
 		mouse_pos[idx][Z] += z;
-		mouse_flags[idx] |= 0x80 | (b&3);
+		mouse_flags[idx] |= 0x80 | (b&7);
 	}
 
 	// 8 bit core expects ps2 like data
@@ -2231,7 +2332,7 @@ void user_io_kbd(unsigned char m, unsigned char *k, uint8_t priority, unsigned s
 			{
 				if(emu_mode == EMU_MOUSE)
 				{
-					unsigned char b;
+					unsigned char b = 0;
 					if(emu_state & JOY_BTN1) b |= 1;
 					if(emu_state & JOY_BTN2) b |= 2;
 					user_io_mouse(0, b, 0, 0, 0);
@@ -2311,7 +2412,7 @@ void user_io_kbd(unsigned char m, unsigned char *k, uint8_t priority, unsigned s
 							user_io_joystick_emu();
 							if(keyrah == 2) 
 							{
-								unsigned char b;
+								unsigned char b = 0;
 								if(emu_state & JOY_BTN1) b |= 1;
 								if(emu_state & JOY_BTN2) b |= 2;
 								user_io_mouse(0, b, 0, 0, 0);
@@ -2378,7 +2479,7 @@ void user_io_kbd(unsigned char m, unsigned char *k, uint8_t priority, unsigned s
 							user_io_joystick_emu();
 							if(keyrah == 2) 
 							{
-								unsigned char b;
+								unsigned char b = 0;
 								if(emu_state & JOY_BTN1) b |= 1;
 								if(emu_state & JOY_BTN2) b |= 2;
 								user_io_mouse(0, b, 0, 0, 0);
@@ -2540,4 +2641,45 @@ void user_io_change_into_core_dir(void) {
 	iprintf("Trying to open work dir \"%s\"\n", s);
 	ChangeDirectoryName(s);
 
+}
+
+static char user_io_i2c_stat(unsigned char *data) {
+	unsigned char c, d;
+	while(1) {
+		spi_uio_cmd_cont(UIO_I2C_GET);
+		c = SPI(0xff);
+		d = SPI(0xff);
+		DisableIO();
+		if (c & 1) { // end flag
+			if (data) *data = d;
+			i2c_flags = c >> 2;
+			return (c & 2); // ack flag
+		}
+	}
+}
+
+char user_io_i2c_write(unsigned char addr, unsigned char subaddr, unsigned char data) {
+	spi_uio_cmd_cont(UIO_I2C_SEND);
+	spi8(addr << 1);
+	spi8(subaddr);
+	spi8(data);
+	DisableIO();
+	return user_io_i2c_stat(0);
+}
+
+char user_io_i2c_read(unsigned char addr, unsigned char subaddr, unsigned char *data) {
+	spi_uio_cmd_cont(UIO_I2C_SEND);
+	spi8(addr << 1 | 1); // read request
+	spi8(subaddr);
+	spi8(0xff);
+	DisableIO();
+	return user_io_i2c_stat(data);
+}
+
+bool user_io_hdmi_detected() {
+#ifdef HAVE_HDMI
+	return hdmi_detected;
+#else
+	return false;
+#endif
 }

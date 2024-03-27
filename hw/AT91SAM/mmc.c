@@ -46,8 +46,8 @@ static unsigned char response;
 static unsigned char CardType;
 
 // internal functions
-static void MMC_CRC(unsigned char c) RAMFUNC;
-static unsigned char MMC_Command(unsigned char cmd, unsigned long arg) RAMFUNC;
+RAMFUNC static void MMC_CRC(unsigned char c);
+RAMFUNC static unsigned char MMC_Command(unsigned char cmd, unsigned long arg);
 static unsigned char MMC_CMD12(void);
 
 RAMFUNC unsigned char MMC_CheckCard() {
@@ -59,7 +59,7 @@ RAMFUNC unsigned char MMC_CheckCard() {
   return 1;
 }
 
-static RAMFUNC char check_card() {
+RAMFUNC static char check_card() {
   // check of card has been removed and try to re-initialize it
   if(CardType == CARDTYPE_NONE) {
     iprintf("Card was removed, try to init it\n");
@@ -87,15 +87,15 @@ unsigned char MMC_Init(void)
     spi_slow();     // set slow clock
     DisableCard();  // CS = 1
     SPI(0xff);      // DI = 1
-    TIMER_wait(20);  // 20ms delay
+    WaitTimer(20);  // 20ms delay
     for (n=0; n<10; n++) SPI(0xff); // 80 dummy clocks, DI = 1
-    TIMER_wait(20);  // 20ms delay
+    WaitTimer(20);  // 20ms delay
     EnableCard();
 
     CardType = CARDTYPE_NONE;
 
     for(n=0; n<16; n++) {
-      TIMER_wait(1);
+      WaitTimer(1);
       if (MMC_Command(CMD0, 0) == 0x01) break; // try to send CMD0 multiple times
     }
     if (n<16) // got CMD0 IDLE response
@@ -491,7 +491,7 @@ unsigned char MMC_WriteMultiple(unsigned long lba, const unsigned char *pWriteBu
 }
 
 // MMC command
-static RAMFUNC unsigned char MMC_Command(unsigned char cmd, unsigned long arg)
+RAMFUNC static unsigned char MMC_Command(unsigned char cmd, unsigned long arg)
 {
   unsigned char c,b;
 
@@ -581,7 +581,7 @@ static unsigned char MMC_CMD12(void)
 
 
 // MMC CRC calc
-static RAMFUNC void MMC_CRC(unsigned char c)
+RAMFUNC static void MMC_CRC(unsigned char c)
 {
     unsigned char i;
 
