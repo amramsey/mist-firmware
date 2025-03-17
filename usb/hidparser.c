@@ -88,6 +88,7 @@ bool parse_report_descriptor(uint8_t *rep, uint16_t rep_size, hid_report_t *conf
 	uint8_t i;
 
 	//
+	int8_t skip_report = 0;
 	uint8_t report_size, report_count;
 	uint16_t bit_count = 0, usage_count = 0;
 	uint16_t logical_minimum=0, logical_maximum=0;
@@ -169,19 +170,20 @@ bool parse_report_descriptor(uint8_t *rep, uint16_t rep_size, hid_report_t *conf
 					if(btns) {
 						if((conf->type == REPORT_TYPE_JOYSTICK) ||
 						   (conf->type == REPORT_TYPE_MOUSE)) {
-						// scan for up to four buttons
+							// scan for up to 12 buttons
 							char b;
-							for(b=0;b<12;b++) {
+							conf->joystick_mouse.button_count = 0;
+							for(b=0;b<MAX_BUTTONS;b++) {
 								if(report_count > b) {
-								uint16_t this_bit = bit_count+b;
+									uint16_t this_bit = bit_count+b*report_size;
 
 									hidp_debugf("BUTTON%d @ %d (byte %d, mask %d)", b, 
 										this_bit, this_bit/8, 1 << (this_bit%8));
 
 									conf->joystick_mouse.button[b].byte_offset = this_bit/8;
 									conf->joystick_mouse.button[b].bitmask = 1 << (this_bit%8);
+									conf->joystick_mouse.button_count++;
 								}
-								conf->joystick_mouse.button_count = report_count * report_size;
 							}
 
 							// we found at least one button which is all we want to accept this as a valid 
@@ -229,7 +231,7 @@ bool parse_report_descriptor(uint8_t *rep, uint16_t rep_size, hid_report_t *conf
 					hidp_extreme_debugf("INPUT(%d)", value);
 
 					// reset for next inputs
-					bit_count += report_count * report_size;
+					if (!skip_report) bit_count += report_count * report_size;
 					usage_count = 0;
 					btns = 0;
 					for (i=0; i<MAX_AXES; i++) axis[i] = -1;
@@ -284,6 +286,8 @@ bool parse_report_descriptor(uint8_t *rep, uint16_t rep_size, hid_report_t *conf
 							return true;
 						else {
 							// retry with next report
+							memset(conf, 0, sizeof(hid_report_t));
+							skip_report = 0;
 							bit_count = 0;
 							report_complete = 0;
 						}
@@ -317,7 +321,7 @@ bool parse_report_descriptor(uint8_t *rep, uint16_t rep_size, hid_report_t *conf
 						hidp_extreme_debugf(" -> Consumer");
 					} else if(value == USAGE_PAGE_BUTTON) {
 						hidp_extreme_debugf(" -> Buttons");
-						btns = 1;
+						if (!skip_report) btns = 1;
 					} else if(value == USAGE_PAGE_GENERIC_DESKTOP) {
 						hidp_extreme_debugf(" -> Generic Desktop");
 
@@ -362,7 +366,23 @@ bool parse_report_descriptor(uint8_t *rep, uint16_t rep_size, hid_report_t *conf
 					break;
 
 				case 8:
+					// Next report is beginning from this point
+					// If we're already got report descriptor and it's satisfies us - skip the report if it has a different ID
 					hidp_extreme_debugf("REPORT_ID(%d)", value);
+					if (conf->report_id) {
+						if(report_is_usable(bit_count, report_complete, conf)) {
+							skip_report = (conf->report_id == value) ? 0 : 1;
+							if (skip_report) hidp_extreme_debugf(" -> skip report %d", value);
+							break;
+						}
+						else if (skip_report) {
+							// reset report items and try with next report
+							memset(conf, 0, sizeof(hid_report_t));
+							skip_report = 0;
+							bit_count = 0;
+							report_complete = 0;
+						}
+					}
 					conf->report_id = value;
 					break;
 
@@ -411,23 +431,23 @@ bool parse_report_descriptor(uint8_t *rep, uint16_t rep_size, hid_report_t *conf
 						if((conf->type == REPORT_TYPE_JOYSTICK) || (conf->type == REPORT_TYPE_MOUSE)) {
 							if(value == USAGE_X) {
 								hidp_extreme_debugf("JOYSTICK/MOUSE: found x axis @ %d", usage_count);
-								axis[0] = usage_count;
+								if (!skip_report) axis[0] = usage_count;
 							}
 							if(value == USAGE_Y) {
 								hidp_extreme_debugf("JOYSTICK/MOUSE: found y axis @ %d", usage_count);
-								axis[1] = usage_count;
+								if (!skip_report) axis[1] = usage_count;
 							}
 							if(value == USAGE_Z) {
 								hidp_extreme_debugf("JOYSTICK/MOUSE: found z axis @ %d", usage_count);
-								if (axis[2] == -1) axis[2] = usage_count; // don't override wheel
+								if (!skip_report) if (axis[2] == -1) axis[2] = usage_count; // don't override wheel
 							}
 							if(value == USAGE_RX || value == USAGE_RY || value == USAGE_RZ) {
 								hidp_extreme_debugf("JOYSTICK/MOUSE: found R%c axis @ %d", 'X'+(value-USAGE_RX), usage_count);
-								if (axis[3] == -1) axis[3] = usage_count;
+								if (!skip_report) if (axis[3] == -1) axis[3] = usage_count;
 							}
 							if(value == USAGE_WHEEL) {
 								hidp_extreme_debugf("MOUSE: found wheel @ %d", usage_count);
-								axis[2] = usage_count;
+								if (!skip_report) axis[2] = usage_count;
 							}
 						}
 					} else if((value == USAGE_HAT) && app_collection) {
@@ -437,24 +457,24 @@ bool parse_report_descriptor(uint8_t *rep, uint16_t rep_size, hid_report_t *conf
 						// we support hat on joysticks only
 						if(conf->type == REPORT_TYPE_JOYSTICK) {
 							hidp_extreme_debugf("JOYSTICK: found hat @ %d", usage_count);
-							hat = usage_count;
+							if (!skip_report) hat = usage_count;
 						}
 					} else {
 						hidp_extreme_debugf(" -> UNSUPPORTED USAGE");
 						//    return false;
 					}
 
-					usage_count++;
+					if (!skip_report) usage_count++;
 					break;
 
 				case 1:
 					hidp_extreme_debugf("USAGE_MINIMUM(%d)", value);
-					usage_count -= (value-1);
+					if (!skip_report) usage_count -= (value-1);
 					break;
 
 				case 2:
 					hidp_extreme_debugf("USAGE_MAXIMUM(%d)", value);
-					usage_count += value;
+					if (!skip_report) usage_count += value;
 					break;
 
 				default:

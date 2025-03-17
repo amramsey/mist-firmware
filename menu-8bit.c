@@ -26,20 +26,27 @@
 #include "menu-8bit.h"
 #include "user_io.h"
 #include "data_io.h"
+#include "hdd.h"
 #include "fat_compat.h"
 #include "cue_parser.h"
+#include "snes.h"
+#include "zx_col.h"
 
 extern char s[FF_LFN_BUF + 1];
 
 // TODO: remove these extern hacks to private variables
 extern unsigned char menusub;
 extern char fs_pFileExt[13];
+extern hardfileTYPE  hardfiles[4];
+
 
 //////////////////////////
 /////// 8-bit menu ///////
 //////////////////////////
-static unsigned char selected_drive_slot;
+typedef enum _RomType {ROM_NORMAL, ROM_SNES, ROM_ZXCOL, ROM_ZXCHR} RomType;
 
+static unsigned char selected_drive_slot;
+static RomType romtype;
 
 static void substrcpy(char *d, char *s, char idx) {
 	char p = 0;
@@ -116,9 +123,31 @@ static unsigned long long getStatusMask(char *opt) {
 
 static char RomFileSelected(uint8_t idx, const char *SelectedName) {
 	FIL file;
+	char ext_idx = user_io_ext_idx(SelectedName, fs_pFileExt);
+
 	// this assumes that further file entries only exist if the first one also exists
 	if (f_open(&file, SelectedName, FA_READ) == FR_OK) {
-		data_io_file_tx(&file, user_io_ext_idx(SelectedName, fs_pFileExt)<<6 | selected_drive_slot, GetExtension(SelectedName));
+		if (romtype == ROM_ZXCOL || romtype == ROM_ZXCHR) {
+			if (romtype == ROM_ZXCOL && !zx_col_load(&file, sector_buffer)) {
+				ErrorMessage("\n   Error parsing COL file!\n", 0);
+				f_close(&file);
+				return 0;
+			} else if (romtype == ROM_ZXCHR && !zx_chr_load(&file, sector_buffer)) {
+				ErrorMessage("\n   Error parsing CHR file!\n", 0);
+				f_close(&file);
+				return 0;
+			} else {
+				data_io_file_tx_prepare(&file, ext_idx << 6 | selected_drive_slot, GetExtension(SelectedName));
+				EnableFpga();
+				SPI(DIO_FILE_TX_DAT);
+				spi_write(sector_buffer, 1024+(romtype == ROM_ZXCOL ? 1 : 0));
+				DisableFpga();
+				data_io_file_tx_done();
+			}
+		} else {
+			if (romtype == ROM_SNES) ext_idx = snes_getromtype(&file);
+			data_io_file_tx(&file, ext_idx << 6 | selected_drive_slot, GetExtension(SelectedName));
+		}
 		f_close(&file);
 	}
 	// close menu afterwards
@@ -129,8 +158,17 @@ static char RomFileSelected(uint8_t idx, const char *SelectedName) {
 static char ImageFileSelected(uint8_t idx, const char *SelectedName) {
 	// select image for SD card
 	iprintf("Image selected: %s\n", SelectedName);
-	data_io_set_index(user_io_ext_idx(SelectedName, fs_pFileExt)<<6 | selected_drive_slot);
-	user_io_file_mount(SelectedName, selected_drive_slot);
+	if ((user_io_get_core_features() & (FEAT_IDE0 << (2*selected_drive_slot))) == (FEAT_IDE0_ATA << (2*selected_drive_slot))) {
+		iprintf("IDE %d: ATA Hard Disk\n", selected_drive_slot);
+		hardfiles[selected_drive_slot].enabled = HDF_FILE;
+		strncpy(hardfiles[selected_drive_slot].name, SelectedName, sizeof(hardfiles[0].name));
+		hardfiles[selected_drive_slot].name[sizeof(hardfiles[0].name)-1] = 0;
+		OpenHardfile(selected_drive_slot, false);
+		SendHDFCfg();
+	} else {
+		data_io_set_index(user_io_ext_idx(SelectedName, fs_pFileExt)<<6 | selected_drive_slot);
+		user_io_file_mount(SelectedName, selected_drive_slot);
+	}
 	CloseMenu();
 	return 0;
 }
@@ -192,6 +230,7 @@ static char GetMenuItem_8bit(uint8_t idx, char action, menu_item_t *item) {
 				strncpy(ext, p, 13);
 				while(strlen(ext) < 3) strcat(ext, " ");
 				selected_drive_slot = 1;
+				romtype = ROM_NORMAL;
 				SelectFileNG(ext, SCAN_DIR | SCAN_LFN, RomFileSelected, 1);
 			} else if (action == MENU_ACT_GET) {
 				//menumask = 1;
@@ -244,6 +283,10 @@ static char GetMenuItem_8bit(uint8_t idx, char action, menu_item_t *item) {
 				iscue = 1;
 			}
 			if (p[1]>='0' && p[1]<='9') selected_drive_slot = p[1]-'0';
+			romtype = ROM_NORMAL;
+			if (p[1] && p[1] != ',' && p[2] && p[2] != ',' && !strncmp(&p[2], "SNES", 4)) romtype = ROM_SNES; // F1SNES
+			if (p[1] && p[1] != ',' && p[2] && p[2] != ',' && !strncmp(&p[2], "ZXCOL", 5)) romtype = ROM_ZXCOL; // F2ZXCOL
+			if (p[1] && p[1] != ',' && p[2] && p[2] != ',' && !strncmp(&p[2], "ZXCHR", 5)) romtype = ROM_ZXCHR; // F3ZXCHR
 			substrcpy(ext, p, 1);
 			while(strlen(ext) < 3) strcat(ext, " ");
 			SelectFileNG(ext, SCAN_DIR | SCAN_LFN, (p[0] == 'F')?RomFileSelected:iscue?CueFileSelected:ImageFileSelected, 1);
@@ -301,6 +344,27 @@ static char GetMenuItem_8bit(uint8_t idx, char action, menu_item_t *item) {
 			user_io_8bit_set_status(status ^ mask, mask);
 			// ... and change it again in case of a toggle bit
 			user_io_8bit_set_status(status, mask);
+		} else if (action == MENU_ACT_GET) {
+			s[0] = ' ';
+			substrcpy(s+1, p, 1);
+		} else {
+			return 0;
+		}
+	}
+
+	// check for Prof'I'le strings
+	if(p && (p[0] == 'I')) {
+		if (action == MENU_ACT_SEL || action == MENU_ACT_PLUS || action == MENU_ACT_MINUS) {
+			unsigned long long mask = 0, preset = 0;
+			substrcpy(s, p, 2);
+			preset = strtoll(s, NULL, 0);
+			substrcpy(s, p, 3);
+			mask = strtoll(s, NULL, 0);
+			menu_debugf("Option %s %llx %llx\n", p, preset, mask);
+			// change bit with reset
+			user_io_8bit_set_status(preset | UIO_STATUS_RESET, mask | UIO_STATUS_RESET);
+			// release reset
+			user_io_8bit_set_status(preset & ~UIO_STATUS_RESET, mask | UIO_STATUS_RESET);
 		} else if (action == MENU_ACT_GET) {
 			s[0] = ' ';
 			substrcpy(s+1, p, 1);

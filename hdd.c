@@ -347,15 +347,26 @@ static void WritePacket(unsigned char unit, const unsigned char *buf, unsigned s
     while (!(GetFPGAStatus() & CMD_IDECMD)); // wait for empty sector buffer
     WriteTaskFile(0, 0x02, 0, bytes & 0xff, (bytes>>8) & 0xff, 0xa0 | ((unit & 0x01)<<4));
     if (bytes) {
-      EnableFpga();
-      SPI(CMD_IDE_DATA_WR); // write data command
-      SPI(0x00);
-      SPI(0x00);
-      SPI(0x00);
-      SPI(0x00);
-      SPI(0x00);
-      spi_write(buf, bytes);
-      DisableFpga();
+#ifdef HAVE_QSPI
+      if(minimig_v2()) {
+        qspi_start_write();
+        qspi_write_block(buf, bytes);
+        qspi_end();
+      } else {
+#else
+        EnableFpga();
+        SPI(CMD_IDE_DATA_WR); // write data command
+        SPI(0x00);
+        SPI(0x00);
+        SPI(0x00);
+        SPI(0x00);
+        SPI(0x00);
+        spi_write(buf, bytes);
+        DisableFpga();
+#endif
+#ifdef HAVE_QSPI
+      }
+#endif
     }
     buf += bytes;
     bufsize -= bytes;
@@ -593,11 +604,12 @@ static void PKT_PlayAudioTrackIndex(unsigned char *cmd, unsigned char unit)
     cdrom_send_error(unit);
     return;
   }
-  if (starttrack > endtrack || starttrack >= toc.last || !starttrack || !endtrack || endtrack >= toc.last) {
+  if (starttrack > endtrack || starttrack > toc.last || !starttrack || !endtrack) {
     cdrom_setsense(SENSEKEY_ILLEGAL_REQUEST, 0x21, 0);
     cdrom_send_error(unit);
     return;
   }
+  if (endtrack > toc.last) endtrack = toc.last;
   PKT_PlayAudio(unit, toc.tracks[starttrack-1].start, toc.tracks[endtrack-1].end);
 }
 
@@ -1223,7 +1235,7 @@ static inline void ATA_ReadSectors(unsigned char* tfr, unsigned short sector, un
   // Read Sectors (0x20)
   long lba;
   int i;
-  int block_count;
+  int block_count, blocks;
 
   lba=chs2lba(cylinder, head, sector, unit, lbamode);
   hdd_debugf("IDE%d: read %s, %d.%d.%d:%d, %d", unit, (lbamode ? "LBA" : "CHS"), cylinder, head, sector, lba, sector_count);
@@ -1316,7 +1328,7 @@ static inline void ATA_ReadSectors(unsigned char* tfr, unsigned short sector, un
             FileReadBlockEx(&hdf[unit].idxfile->file, 0, blk); // NULL enables direct transfer to the FPGA
           } else {
 #endif
-            int blocks = blk;
+            blocks = blk;
             while (blocks) {
               FileReadBlockEx(&hdf[unit].idxfile->file, sector_buffer, MIN(blocks, SECTOR_BUFFER_SIZE/512));
               if (!verify) {
@@ -1359,7 +1371,7 @@ static inline void ATA_ReadSectors(unsigned char* tfr, unsigned short sector, un
           lba+=block_count;
         } else {
 #endif
-          int blocks = block_count;
+          blocks = block_count;
           while (blocks) {
             disk_read(fs.pdrv, sector_buffer, lba+hdf[unit].offset, MIN(blocks, SECTOR_BUFFER_SIZE/512));
             if (!verify) {
